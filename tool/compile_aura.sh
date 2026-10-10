@@ -235,7 +235,7 @@ export FLUTTER_ROOT="$(cd "$flutter_root" && pwd -P)"
 export PATH="$FLUTTER_ROOT/bin:$PATH"
 
 if [[ -z "${AURA_PUBLIC_KEY_ENV:-}" ]]; then
-    AURA_PUBLIC_KEY_ENV='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAi9+ZvYGgwGWKyG+1CfBsF0Qb9iUCqg454HU011guOGZPxcQNpAtVheZ+Ek3UrlQwYOrWbdCeqr7v1OwkomfmEsdSq9qEBsPGlpdA4PXdeC18aVs/jGMKXQIVBWkXRUCWSGczCrKLzNqujCbYp+/7XSOgcjaLZocLv2G0PZUPDVEwqNmSRD4nYAeF6kyLn/4Syi6nEcUMLCFz8jzpWagCYvrJROfjQeD3DFHpRKLrP9TJQD+nQ7uL9kUakz0aO5rJ2fTD/Sr4XX/pT9tgshCN9VZUxPHy1OqPD/Dkckfh91XKDm5wPbJiDuIqgT7zOxZ9nxqP8u/tEGn/slEp9LnoNwIDAQAB'
+    AURA_PUBLIC_KEY_ENV='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g/JtRJ+Y9WDAY504WdCnACplCVwju/5tnJhkvD3kWbsmfX45t9ZqMyCBo4stXbvRdbpe2WwMmxR/9ZHGGQQ1vjKyE4klsQ03aC836GW8l5y1IV/jknU4C03GRRMjfhkwTKpMjqq3kZAgQ62Yo2Prw0fB2c7b/2RjN5yiUZLtjh8FEQBhe8aW+4lrxEVkRJZxPrkbYdQoqBQKm2hQq1AUHurXx+HwHqDplb6mTcNttbnFtrkS0IDqXrhDSAHjaMLY8k6zyCutL7kTPBrAb44KaYvTRhMRBeUyOXHIb9YfxgAA0cCNs5wIDAQAB'
     public_key_source="build-only fallback"
     log "WARNING: AURA_PUBLIC_KEY_ENV is empty; using the build-only fallback key. Signed model updates will fail closed. Configure production_keys for a production release."
 else

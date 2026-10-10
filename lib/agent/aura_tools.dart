@@ -32,13 +32,13 @@ class ToolResult {
 
 abstract class AuraTools {
   static final Uri _modelUri = Uri.parse(
-    'https://cuentaempresarial111-ux.github.io/Aura-V1.0/model/aura_brain_model.json',
+    'https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/aura_brain_model.json',
   );
   static final Uri _modelDigestUri = Uri.parse(
-    'https://cuentaempresarial111-ux.github.io/Aura-V1.0/model/aura_brain_model.json.sha256',
+    'https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/aura_brain_model.json.sha256',
   );
   static final Uri _modelSignatureUri = Uri.parse(
-    'https://cuentaempresarial111-ux.github.io/Aura-V1.0/model/aura_brain_model.json.sig',
+    'https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/aura_brain_model.json.sig',
   );
   static const int _maxModelBytes = 5 * 1024 * 1024;
   static const MethodChannel _engineChannel =
