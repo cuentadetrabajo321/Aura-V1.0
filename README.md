@@ -146,6 +146,12 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g
 
 Variables protegidas: `AURA_STORE_PASSWORD`, `AURA_KEY_ALIAS`, `AURA_KEY_PASSWORD` y una modalidad de keystore. `AURA_PUBLIC_KEY_ENV` contiene la clave pública DER Base64. El preflight falla antes del build si falta configuración.
 
+En Codemagic, configura `AURA_PUBLIC_KEY_ENV` en el grupo `production_keys` con este valor completo, sin comillas, prefijo ni saltos de línea. La variable del grupo prevalece sobre el fallback local de `tool/compile_aura.sh`:
+
+```text
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g/JtRJ+Y9WDAY504WdCnACplCVwju/5tnJhkvD3kWbsmfX45t9ZqMyCBo4stXbvRdbpe2WwMmxR/9ZHGGQQ1vjKyE4klsQ03aC836GW8l5y1IV/jknU4C03GRRMjfhkwTKpMjqq3kZAgQ62Yo2Prw0fB2c7b/2RjN5yiUZLtjh8FEQBhe8aW+4lrxEVkRJZxPrkbYdQoqBQKm2hQq1AUHurXx+HwHqDplb6mTcNttbnFtrkS0IDqXrhDSAHjaMLY8k6zyCutL7kTPBrAb44KaYvTRhMRBeUyOXHIb9YfxgAA0cCNs5wIDAQAB
+```
+
 ## 8. Estructura del repositorio
 
 ```text
