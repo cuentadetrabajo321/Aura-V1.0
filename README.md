@@ -103,7 +103,7 @@ Runner Linux `x86_64`, kernel `6.8.0-1064-azure`, glibc 2.39, 2 CPUs lógicas. N
 | Warm, modelo residente | 10,000 | 1.980 ms | 4.085 ms | 7.300 ms | 434.22 dominios/s |
 | Cold, incluye recarga JSON | 500 | 56.011 ms | 97.569 ms | 136.403 ms | 16.08 dominios/s |
 
-URL pública: <https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/>. Allí se sirven JSON, `.sha256` y `.sig`. La firma se verificó localmente con RSA-2048, PKCS#1 v1.5 y SHA-256. El cliente valida firma y digest antes de cifrar/instalar; un fallo activa reglas conservadoras sin bloqueo automático.
+La orden `actualizar` descarga el JSON, el sidecar `.sha256` y la firma `.sig` desde <https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/>. La firma se verificó localmente con RSA-2048, PKCS#1 v1.5 y SHA-256. El cliente valida firma y digest antes de cifrar/instalar; un fallo activa reglas conservadoras sin bloqueo automático.
 
 ## 4. Pipeline de datos
 
