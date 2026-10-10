@@ -105,6 +105,31 @@ Runner Linux `x86_64`, kernel `6.8.0-1064-azure`, glibc 2.39, 2 CPUs lógicas. N
 
 La orden `actualizar` descarga el JSON, el sidecar `.sha256` y la firma `.sig` desde <https://yovanymoreno001-glitch.github.io/Aura-V1.0/model/>. La firma se verificó localmente con RSA-2048, PKCS#1 v1.5 y SHA-256. El cliente valida firma y digest antes de cifrar/instalar; un fallo activa reglas conservadoras sin bloqueo automático.
 
+## Configuración de Codemagic para Producción
+
+### Variables del grupo `production_keys`
+
+Configura estas variables en Codemagic → Environment groups → `production_keys`:
+
+| Variable | Tipo | Descripción |
+|---|---|---|
+| `AURA_PUBLIC_KEY_ENV` | Secure | Clave pública RSA Base64 DER (ver abajo) |
+| `AURA_KEYSTORE_FILE` | File | Archivo `.jks` de tu keystore de producción |
+| `AURA_STORE_PASSWORD` | Secure | Contraseña del keystore |
+| `AURA_KEY_ALIAS` | Secure | Alias de la clave (ej: `aura-release`) |
+| `AURA_KEY_PASSWORD` | Secure | Contraseña de la clave |
+| `AURA_BUILD_FORMAT` | Secure | `apk` (predeterminado) o `aab` |
+
+### Clave pública RSA Base64 DER
+
+Copia este valor exacto para `AURA_PUBLIC_KEY_ENV` en una sola línea, sin comillas, espacios ni saltos de línea:
+
+```text
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g/JtRJ+Y9WDAY504WdCnACplCVwju/5tnJhkvD3kWbsmfX45t9ZqMyCBo4stXbvRdbpe2WwMmxR/9ZHGGQQ1vjKyE4klsQ03aC836GW8l5y1IV/jknU4C03GRRMjfhkwTKpMjqq3kZAgQ62Yo2Prw0fB2c7b/2RjN5yiUZLtjh8FEQBhe8aW+4lrxEVkRJZxPrkbYdQoqBQKm2hQq1AUHurXx+HwHqDplb6mTcNttbnFtrkS0IDqXrhDSAHjaMLY8k6zyCutL7kTPBrAb44KaYvTRhMRBeUyOXHIb9YfxgAA0cCNs5wIDAQAB
+```
+
+La clave pública no es secreta y debe corresponder a la clave privada que firma el modelo. Protege como secretos `AURA_STORE_PASSWORD`, `AURA_KEY_PASSWORD` y cualquier keystore privado. En el `codemagic.yaml` actual, `AURA_BUILD_FORMAT` tiene un valor de entorno predeterminado `apk`; configura el override de formato según la política del proyecto.
+
 ## 4. Pipeline de datos
 
 - Amenazas: [Phishing.Database](https://github.com/mitchellkrogza/Phishing.Database), MIT.
