@@ -17,15 +17,15 @@ sys.path.insert(0, str(ROOT / "tool/dataset"))
 from dataset.build_dataset import is_allowlisted, normalize_domain  # noqa: E402
 from train_max_aura_brain import FEATURE_ORDER, predict_serialized_model  # noqa: E402
 
-MODEL_PATH = ROOT / "tool/reports/aura_brain_model.json"
 ASSET_MODEL_PATH = ROOT / "assets/model/aura_brain_model.json"
 ASSET_DIGEST_PATH = ROOT / "assets/model/aura_brain_model.json.sha256"
+MODEL_PATH = ASSET_MODEL_PATH
 
 
 @pytest.fixture(scope="module")
 def model():
     if not MODEL_PATH.is_file():
-        pytest.fail("Run python tool/train_max_aura_brain.py before the golden tests")
+        pytest.fail("The versioned Aura model asset is missing")
     return json.loads(MODEL_PATH.read_text(encoding="utf-8"))
 
 
@@ -58,21 +58,32 @@ def test_malformed_host_is_rejected_without_exception():
 
 
 def test_model_schema_and_original_asset_digest(model):
-    original = json.loads(ASSET_MODEL_PATH.read_text(encoding="utf-8"))
-    assert set(model) == set(original)
+    assert set(model) == {
+        "model_name",
+        "model_version",
+        "model_type",
+        "training_status",
+        "training_samples",
+        "csv_files",
+        "training_config",
+        "feature_order",
+        "classes",
+        "trees",
+    }
     assert model["feature_order"] == FEATURE_ORDER
     assert len(model["trees"]) == 500
     assert model["classes"] == {"0": "safe", "1": "threat"}
 
     def validate_node(node: object, depth: int = 0) -> None:
         assert isinstance(node, dict)
-        assert depth <= 32
+        assert depth <= 10
         if node.get("type") == "leaf":
             assert node.get("value") in {0, 1}
             return
         assert node.get("type") == "split"
         assert node.get("feature_index") in range(6)
         assert isinstance(node.get("threshold"), (int, float))
+        assert round(float(node["threshold"]), 4) == node["threshold"]
         validate_node(node.get("left"), depth + 1)
         validate_node(node.get("right"), depth + 1)
 

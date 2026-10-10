@@ -16,9 +16,9 @@ from pathlib import Path
 from train_max_aura_brain import FEATURE_ORDER, extract_maximum_features
 
 ROOT = Path(__file__).resolve().parents[1]
-MODEL_PATH = ROOT / "tool/reports/aura_brain_model.json"
+MODEL_PATH = ROOT / "assets/model/aura_brain_model.json"
 TEST_PATH = ROOT / "data/splits/test.csv"
-REPORT_PATH = ROOT / "tool/reports/benchmark.json"
+REPORT_PATH = ROOT / "tool/reports/benchmark_mobile.json"
 EXPECTED_TREE_COUNT = 500
 WARM_INFERENCES = 10_000
 COLD_INFERENCES = 500
@@ -168,9 +168,11 @@ def main() -> int:
         f"THROUGHPUT={cold['domains_per_second']:.2f} domains/s"
     )
     print(f"RUNNER={report['hardware']['platform']} {report['hardware']['machine']} CPUs={report['hardware']['logical_cpu_count']}")
-    print("Mobile-device performance may differ; see tool/reports/benchmark.json.")
+    print(f"REPORT={REPORT_PATH.relative_to(ROOT)}")
+    print("Mobile-device performance may differ; these are runner measurements.")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+setoo/prs/nhrk.jo
