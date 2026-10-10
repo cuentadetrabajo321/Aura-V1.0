@@ -22,7 +22,6 @@ concurrency:
 
 jobs:
   deploy:
-    if: ${{ hashFiles('assets/model/aura_brain_model.json.sig') != '' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
