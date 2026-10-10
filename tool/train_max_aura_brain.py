@@ -33,6 +33,11 @@ REPORTS_DIR = ROOT / "tool/reports"
 MODEL_OUTPUT = REPORTS_DIR / "aura_brain_model.json"
 METRICS_JSON = REPORTS_DIR / "metrics.json"
 METRICS_MARKDOWN = REPORTS_DIR / "metrics.md"
+MOBILE_MODEL_OUTPUT = REPORTS_DIR / "aura_brain_model_mobile.json"
+MOBILE_METRICS_JSON = REPORTS_DIR / "metrics_mobile.json"
+MOBILE_METRICS_MARKDOWN = REPORTS_DIR / "metrics_mobile.md"
+MOBILE_SIZE_TRIALS = REPORTS_DIR / "mobile_size_trials.json"
+MAX_MOBILE_MODEL_BYTES = 4 * 1024 * 1024
 EXPECTED_CLASSES = {0, 1}
 MIN_TEST_ROWS_PER_CLASS = 500
 
@@ -175,9 +180,9 @@ def predict_serialized_model(model, domain):
     return votes / len(trees)
 
 
-def write_metrics(metrics):
+def write_metrics(metrics, json_path=METRICS_JSON, markdown_path=METRICS_MARKDOWN):
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_write(METRICS_JSON, json.dumps(metrics, indent=2, sort_keys=True) + "\n")
+    atomic_write(json_path, json.dumps(metrics, indent=2, sort_keys=True) + "\n")
     scores = metrics["test_metrics"]
     matrix = scores["confusion_matrix"]
     markdown = "\n".join(
@@ -210,20 +215,23 @@ def write_metrics(metrics):
             "",
         ]
     )
-    atomic_write(METRICS_MARKDOWN, markdown)
+    atomic_write(markdown_path, markdown)
 
 
-def serialize_tree(estimator):
+def serialize_tree(estimator, threshold_decimals=None):
     tree = estimator.tree_
 
     def serialize_node(node_index):
         if tree.feature[node_index] == _tree.TREE_UNDEFINED:
             class_index = int(np.argmax(tree.value[node_index][0]))
             return {"type": "leaf", "value": int(estimator.classes_[class_index])}
+        threshold = float(tree.threshold[node_index])
+        if threshold_decimals is not None:
+            threshold = round(threshold, threshold_decimals)
         return {
             "type": "split",
             "feature_index": int(tree.feature[node_index]),
-            "threshold": float(tree.threshold[node_index]),
+            "threshold": threshold,
             "left": serialize_node(tree.children_left[node_index]),
             "right": serialize_node(tree.children_right[node_index]),
         }
@@ -243,14 +251,186 @@ def atomic_write(path, content):
     os.replace(temporary_path, path)
 
 
+def train_mobile_preset():
+    train_rows = read_split(DATASET_DIR / "splits/train.csv")
+    val_rows = read_split(DATASET_DIR / "splits/val.csv")
+    test_rows = read_split(DATASET_DIR / "splits/test.csv")
+    for split_name, rows in (("train", train_rows), ("val", val_rows), ("test", test_rows)):
+        counts = {label: sum(row_label == label for _, row_label in rows) for label in EXPECTED_CLASSES}
+        if any(counts[label] < MIN_TEST_ROWS_PER_CLASS for label in EXPECTED_CLASSES):
+            raise SystemExit(
+                f"{split_name} split must contain at least 500 rows per class "
+                f"(safe={counts[0]}, threat={counts[1]}). Restore the stash or regenerate the real dataset."
+            )
+
+    training_features = np.asarray(
+        [extract_maximum_features(domain) for domain, _ in train_rows]
+    )
+    training_labels = np.asarray([label for _, label in train_rows], dtype=np.int64)
+    configurations = [
+        (10, 8), (10, 32), (10, 128), (10, 512), (10, 2048),
+        (9, 4096), (9, 8192), (9, 16384),
+        (8, 32768), (8, 65536), (8, 131072),
+    ]
+    trials = []
+    selected = None
+    for max_depth, min_samples_leaf in configurations:
+        print(
+            f"Training Aura mobile forest: 500 trees, max_depth={max_depth}, "
+            f"min_samples_leaf={min_samples_leaf}, train={len(train_rows)}, "
+            f"val={len(val_rows)}, test={len(test_rows)}."
+        )
+        forest = RandomForestClassifier(
+            n_estimators=500,
+            max_depth=max_depth,
+            min_samples_leaf=min_samples_leaf,
+            n_jobs=-1,
+            random_state=42,
+            class_weight="balanced_subsample",
+        )
+        training_started = time.perf_counter()
+        forest.fit(training_features, training_labels)
+        training_seconds = time.perf_counter() - training_started
+        model = {
+            "model_name": "Aura Lexical Threat Forest",
+            "model_version": "3.0.0",
+            "model_type": "random_forest",
+            "training_status": "heuristic_seed_with_csv",
+            "training_samples": len(train_rows),
+            "csv_files": [str((DATASET_DIR / "splits/train.csv").relative_to(ROOT))],
+            "training_config": {
+                "n_estimators": 500,
+                "max_depth": max_depth,
+                "min_samples_leaf": min_samples_leaf,
+                "n_jobs": -1,
+                "random_state": 42,
+            },
+            "feature_order": FEATURE_ORDER,
+            "classes": {"0": "safe", "1": "threat"},
+            "trees": [
+                serialize_tree(estimator, threshold_decimals=4)
+                for estimator in forest.estimators_
+            ],
+        }
+        if len(model["trees"]) != 500:
+            raise RuntimeError("El preset móvil debe conservar exactamente 500 árboles.")
+        model_bytes = (
+            json.dumps(model, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        trees = model["trees"]
+
+        def node_stats(node):
+            if node["type"] == "leaf":
+                return 1, 0
+            left_leaves, left_depth = node_stats(node["left"])
+            right_leaves, right_depth = node_stats(node["right"])
+            return left_leaves + right_leaves, 1 + max(left_depth, right_depth)
+
+        tree_stats = [node_stats(tree["root"]) for tree in trees]
+        leaves = sum(item[0] for item in tree_stats)
+        observed_depth = max(item[1] for item in tree_stats)
+        trial = {
+            "trees": len(trees),
+            "max_depth": max_depth,
+            "observed_depth": observed_depth,
+            "min_samples_leaf": min_samples_leaf,
+            "leaves": leaves,
+            "bytes": len(model_bytes),
+        }
+        trials.append(trial)
+        print(
+            f"MOBILE_TRIAL trees={len(trees)} max_depth={max_depth} "
+            f"observed_depth={observed_depth} min_samples_leaf={min_samples_leaf} "
+            f"leaves={leaves} bytes={len(model_bytes)}"
+        )
+        if len(model_bytes) <= MAX_MOBILE_MODEL_BYTES:
+            selected = (model, model_bytes, trial, training_seconds)
+            break
+        del forest, model, model_bytes
+
+    atomic_write(MOBILE_SIZE_TRIALS, json.dumps(trials, indent=2) + "\n")
+    if selected is None:
+        raise SystemExit(
+            "Mobile preset still exceeds 4194304 bytes at max_depth=8 with aggressive pruning; "
+            f"see {MOBILE_SIZE_TRIALS.relative_to(ROOT)}. No base asset was changed."
+        )
+
+    model, model_bytes, trial, training_seconds = selected
+    atomic_write(MOBILE_MODEL_OUTPUT, model_bytes.decode("utf-8"))
+    evaluation_domains = [domain for domain, _ in test_rows]
+    evaluation_labels = [label for _, label in test_rows]
+    validation_domains = [domain for domain, _ in val_rows]
+    validation_labels = [label for _, label in val_rows]
+    test_predictions = [
+        int(predict_serialized_model(model, domain) >= 0.5)
+        for domain in evaluation_domains
+    ]
+    validation_predictions = [
+        int(predict_serialized_model(model, domain) >= 0.5)
+        for domain in validation_domains
+    ]
+    manifest_path = DATASET_DIR / "dataset_manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Dataset manifest is missing: {manifest_path}")
+    metrics = {
+        "metrics_version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "evaluation_mode": "stratified-test-split-serialized-mobile-model",
+        "training_rows": len(train_rows),
+        "validation_rows": len(val_rows),
+        "test_rows": len(test_rows),
+        "test_class_counts": {
+            "safe": sum(label == 0 for label in evaluation_labels),
+            "threat": sum(label == 1 for label in evaluation_labels),
+        },
+        "tree_count": 500,
+        "maximum_observed_depth": trial["observed_depth"],
+        "leaf_count": trial["leaves"],
+        "model_bytes": len(model_bytes),
+        "size_trials": trials,
+        "hyperparameters": {
+            "n_estimators": 500,
+            "max_depth": trial["max_depth"],
+            "min_samples_leaf": trial["min_samples_leaf"],
+            "n_jobs": -1,
+            "random_state": 42,
+            "class_weight": "balanced_subsample",
+            "feature_order": FEATURE_ORDER,
+            "threshold_precision_decimals": 4,
+        },
+        "training_seconds": training_seconds,
+        "dataset_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "metrics_model_file": str(MOBILE_MODEL_OUTPUT.relative_to(ROOT)),
+        "validation_metrics": evaluate_metrics(validation_labels, validation_predictions),
+        "test_metrics": evaluate_metrics(evaluation_labels, test_predictions),
+    }
+    write_metrics(metrics, MOBILE_METRICS_JSON, MOBILE_METRICS_MARKDOWN)
+    print(f"MODEL_PRESET={MOBILE_MODEL_OUTPUT.relative_to(ROOT)}")
+    print(f"MODEL_BYTES={len(model_bytes)}")
+    print(f"METRICS_JSON={MOBILE_METRICS_JSON.relative_to(ROOT)}")
+    print(f"METRICS_MARKDOWN={MOBILE_METRICS_MARKDOWN.relative_to(ROOT)}")
+    print("Mobile candidate and metrics generated; tracked assets/model files were not modified.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Entrena el bosque local de Aura.")
+    parser.add_argument(
+        "--preset",
+        choices=("full", "mobile"),
+        default="full",
+        help="Select the full 500-tree candidate or the size-constrained 500-tree mobile preset.",
+    )
     parser.add_argument(
         "--allow-seed-only",
         action="store_true",
         help="Allow the documented 30-domain seed fallback when a qualified test split is unavailable.",
     )
     args = parser.parse_args()
+    if args.preset == "mobile":
+        if args.allow_seed_only:
+            parser.error("--preset mobile never permits --allow-seed-only")
+        train_mobile_preset()
+        return
     try:
         train_rows = read_split(DATASET_DIR / "splits/train.csv")
         val_rows = read_split(DATASET_DIR / "splits/val.csv")
