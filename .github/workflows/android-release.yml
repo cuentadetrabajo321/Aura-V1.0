@@ -1,0 +1,55 @@
+name: 'Aura Android Release Pipeline'
+
+on:
+  push:
+    branches:
+      - main
+      - principal
+  workflow_dispatch:
+
+jobs:
+  android-release:
+    name: Build and upload signed APK
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      AURA_KEYSTORE_BASE64: ${{ secrets.AURA_KEYSTORE_BASE64 }}
+      AURA_STORE_PASSWORD: ${{ secrets.AURA_STORE_PASSWORD }}
+      AURA_KEY_ALIAS: ${{ secrets.AURA_KEY_ALIAS }}
+      AURA_KEY_PASSWORD: ${{ secrets.AURA_KEY_PASSWORD }}
+      AURA_PUBLIC_KEY_ENV: ${{ secrets.AURA_PUBLIC_KEY_ENV }}
+      AURA_BUILD_FORMAT: apk
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+          cache: gradle
+
+      - name: Set up Flutter SDK
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Install Flutter dependencies
+        run: flutter pub get
+
+      - name: Build signed Android release APK
+        shell: bash
+        run: bash tool/compile_aura.sh
+
+      - name: Upload signed APK artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aura-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
