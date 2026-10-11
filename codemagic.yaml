@@ -2,7 +2,7 @@ workflows:
   android-build:
     name: Aura Android Release Pipeline
     max_build_duration: 60
-    instance_type: linux
+    instance_type: linux_x86_64
     environment:
       groups:
         - production_keys
