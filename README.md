@@ -149,7 +149,9 @@ Reproducción: `python -m pip install -r tool/requirements-train.txt`, `python t
 
 ## 5. Firma y seguridad Android
 
-- Release usa `signingConfigs.release`. Variables requeridas: `AURA_KEYSTORE_PATH` o `AURA_KEYSTORE_BASE64`, `AURA_STORE_PASSWORD`, `AURA_KEY_ALIAS`, `AURA_KEY_PASSWORD`.
+- La configuración Android usa `compileSdk 36`, `targetSdk 36` y NDK `25.2.13676358`.
+- Gradle firma `release` solo cuando están presentes las cuatro variables `AURA_KEYSTORE_PATH`, `AURA_STORE_PASSWORD`, `AURA_KEY_ALIAS` y `AURA_KEY_PASSWORD`, y el keystore existe. Si no se configura ninguna, permite un artefacto release sin firmar y emite una advertencia; nunca sustituye la firma de producción por la clave debug. La configuración parcial o un keystore ausente con credenciales configuradas genera un error explícito.
+- El modo release sin firma es solo para diagnóstico local: el artefacto no es instalable como actualización firmada. `tool/compile_aura.sh` y los flujos de producción siguen exigiendo y verificando el keystore.
 - `tool/compile_aura.sh` falla rápido si faltan valores, valida con `keytool`, registra fingerprint SHA-256 y rechaza certificado/sujeto `Android Debug`.
 - Para APK, usa `apksigner` si está disponible; su fallback `keytool` verifica el certificado configurado, no los bytes del APK. Para AAB verifica el certificado configurado.
 - `AURA_ALLOWED_CERT_SHA256` se genera con el certificado activo. No se incluyen contraseñas, keystores ni claves privadas en el repo.
@@ -269,10 +271,10 @@ tool/train_max_aura_brain.py
 
 ## 9. Build y validación
 
-Para un build debug local se requiere Flutter stable, JDK 17, Android SDK Platform 36, Build Tools 36.0.0, NDK 28.2.13676358 y CMake 3.22.1. El build debug no necesita credenciales de release. Instala los componentes Android con `sdkmanager` y ejecuta:
+Para un build local se requiere Flutter stable, JDK 17, Android SDK Platform 36, Build Tools 36.0.0, NDK 25.2.13676358 y CMake 3.22.1. El build debug no necesita credenciales de release. Instala los componentes Android con `sdkmanager` y ejecuta:
 
 ```sh
-sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;25.2.13676358" "cmake;3.22.1"
 flutter pub get
 flutter analyze
 flutter test
@@ -281,13 +283,13 @@ flutter build apk --debug
 
 El build debug se verificó con las cuatro ABI configuradas (`armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`). El proyecto usa AndroidX con Jetifier desactivado.
 
-Para generar una release se requieren credenciales de firmado:
+Un build release directo de Gradle sin variables de firmado produce un artefacto sin firma, solo apto para diagnóstico local:
 
 ```sh
 flutter build apk --release
 ```
 
-Ruta recomendada con preflight/verificación:
+Para producir y verificar una release distribuible, configura el keystore y las cuatro variables `AURA_KEYSTORE_PATH`, `AURA_STORE_PASSWORD`, `AURA_KEY_ALIAS` y `AURA_KEY_PASSWORD`, y usa el preflight:
 
 ```sh
 bash tool/compile_aura.sh --check-signing
@@ -331,10 +333,30 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
+def releaseSigningVariables = [
+    "AURA_KEYSTORE_PATH",
+    "AURA_STORE_PASSWORD",
+    "AURA_KEY_ALIAS",
+    "AURA_KEY_PASSWORD",
+]
+def releaseSigningValues = releaseSigningVariables.collectEntries {
+    [(it): System.getenv(it)]
+}
+def releaseSigningConfigured = releaseSigningValues.values().any {
+    it != null && !it.trim().isEmpty()
+}
+def releaseSigningComplete = releaseSigningValues.values().every {
+    it != null && !it.trim().isEmpty()
+}
+def releaseKeystorePath = releaseSigningValues["AURA_KEYSTORE_PATH"]
+def releaseKeystoreFile = releaseKeystorePath
+    ? project.file(releaseKeystorePath).absoluteFile
+    : null
+
 android {
     namespace "com.ciberdefensa.aura"
     compileSdk 36
-    ndkVersion flutter.ndkVersion
+    ndkVersion = "25.2.13676358"
 
     buildFeatures {
         buildConfig true
@@ -373,7 +395,9 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            if (releaseSigningComplete && releaseKeystoreFile.isFile()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -440,32 +464,30 @@ android.buildTypes.each { buildType ->
     )
 }
 
-def releaseSigningVariables = [
-    "AURA_KEYSTORE_PATH",
-    "AURA_STORE_PASSWORD",
-    "AURA_KEY_ALIAS",
-    "AURA_KEY_PASSWORD",
-]
-
 gradle.taskGraph.whenReady { taskGraph ->
     def releaseSigningRequested = taskGraph.allTasks.any { task ->
         task.project == project &&
             (task.name == "printReleaseSigning" || task.name.toLowerCase().contains("release"))
     }
     if (releaseSigningRequested) {
-        def missingVariables = releaseSigningVariables.findAll {
-            def value = System.getenv(it)
-            value == null || value.trim().isEmpty()
-        }
-        if (!missingVariables.isEmpty()) {
+        if (releaseSigningConfigured && !releaseSigningComplete) {
+            def missingVariables = releaseSigningVariables.findAll {
+                def value = releaseSigningValues[it]
+                value == null || value.trim().isEmpty()
+            }
             throw new GradleException(
                 "Missing required release signing environment variable(s): ${missingVariables.join(', ')}"
             )
         }
-        def keystoreFile = android.signingConfigs.release.storeFile
-        if (keystoreFile == null || !keystoreFile.isFile()) {
+        if (releaseSigningComplete &&
+            (releaseKeystoreFile == null || !releaseKeystoreFile.isFile())) {
             throw new GradleException(
-                "AURA_KEYSTORE_PATH must point to an existing keystore file."
+                "AURA_KEYSTORE_PATH must point to an existing keystore file. Release signing credentials were supplied, but the keystore is unavailable."
+            )
+        }
+        if (!releaseSigningConfigured) {
+            logger.warn(
+                "No release signing credentials were supplied; the release artifact will be unsigned."
             )
         }
     }
@@ -476,8 +498,8 @@ tasks.register("printReleaseSigning") {
     description = "Prints the configured release signing identity without exposing credentials."
     doLast {
         def releaseSigningConfig = android.buildTypes.getByName("release").signingConfig
-        println "STORE_FILE=${releaseSigningConfig.storeFile?.absolutePath ?: ''}"
-        println "KEY_ALIAS=${releaseSigningConfig.keyAlias ?: ''}"
+        println "STORE_FILE=${releaseSigningConfig?.storeFile?.absolutePath ?: ''}"
+        println "KEY_ALIAS=${releaseSigningConfig?.keyAlias ?: ''}"
         println "IS_DEBUG_SIGNING=${releaseSigningConfig == android.signingConfigs.debug}"
     }
 }
