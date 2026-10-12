@@ -2,6 +2,7 @@ workflows:
   android-build:
     name: Aura Android Release Pipeline
     max_build_duration: 60
+    instance_type: mac_mini_m2
     environment:
       groups:
         - production_keys
@@ -59,4 +60,73 @@ workflows:
     artifacts:
       - build/app/outputs/flutter-apk/*.apk
       - build/app/outputs/bundle/release/*.aab
+
+  aura-debug-diagnostic:
+    name: Aura - diagnóstico APK debug
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Verify checkout and build debug APK
+        script: |
+          set -euo pipefail
+          if [[ -z "${CM_BUILD_DIR:-}" ]]; then
+            printf '%s\n' '[AURA-DIAGNOSTIC][ERROR] CM_BUILD_DIR is not defined.' >&2
+            exit 1
+          fi
+          if [[ ! -d "$CM_BUILD_DIR" ]]; then
+            printf '%s\n' '[AURA-DIAGNOSTIC][ERROR] CM_BUILD_DIR is not an existing directory.' >&2
+            exit 1
+          fi
+
+          cd -- "$CM_BUILD_DIR"
+          printf 'Branch: %s\n' "${CM_BRANCH:-<not defined>}"
+          printf 'Working directory: %s\n' "$PWD"
+
+          required_paths=(
+            pubspec.yaml
+            lib
+            android
+            android/app/build.gradle
+            android/gradle/wrapper/gradle-wrapper.properties
+            android/settings.gradle
+            android/app/src/main/AndroidManifest.xml
+            android/app/src/main/cpp/hev-socks5-tunnel/Android.mk
+            android/app/src/main/cpp/hev-socks5-tunnel/Application.mk
+            tool/setup_env_fix.sh
+          )
+          diagnostic_paths=(
+            "${required_paths[@]}"
+            android/app/src/main/cpp/hev-socks5-tunnel
+            tool/compile_aura.sh
+          )
+
+          for path in "${diagnostic_paths[@]}"; do
+            if [[ -e "$path" ]]; then
+              printf 'PRESENT: %s\n' "$path"
+            else
+              printf 'MISSING: %s\n' "$path"
+            fi
+          done
+          for path in "${required_paths[@]}"; do
+            if [[ ! -e "$path" ]]; then
+              printf '[AURA-DIAGNOSTIC][ERROR] Required repository path is missing: %s\n' "$path" >&2
+              exit 1
+            fi
+          done
+
+          bash tool/setup_env_fix.sh
+          flutter pub get
+          flutter build apk --debug -v
+
+          artifact="build/app/outputs/flutter-apk/app-debug.apk"
+          if [[ ! -s "$artifact" ]]; then
+            printf '[AURA-DIAGNOSTIC][ERROR] Expected debug APK was not created: %s\n' "$artifact" >&2
+            exit 1
+          fi
+          printf 'PRESENT: %s\n' "$artifact"
+    artifacts:
+      - build/app/outputs/flutter-apk/app-debug.apk
       
