@@ -34,7 +34,7 @@ El estado se marca **En desarrollo**: el repositorio tiene workflows de validaci
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el EventChannel nativo. Los eventos `BLOCKED` y `DGA_ALERT` inician `DNS → hev-mapped-dns/motor C → JNI/eventos → Dart → AuraAIBrain → AuraAIInference en isolate → bosque serializado`; si el modelo confirma una amenaza, Aura solicita una regla DNS y registra si el motor la confirmó. La allowlist se consulta antes del bosque. El clasificador da votos binarios por mayoría; esos votos no son probabilidades calibradas.
+Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el EventChannel nativo. Los eventos `BLOCKED`, `DGA_ALERT` y `SNI_OBSERVED` pueden iniciar `DNS/SNI → motor C → JNI/EventChannel → Dart → AuraAIBrain → AuraAIInference en isolate → bosque serializado`; si el modelo confirma una amenaza, Aura solicita una regla DNS y registra si el motor la confirmó. La allowlist se consulta antes del bosque. El clasificador da votos binarios por mayoría; esos votos no son probabilidades calibradas.
 
 | Componente | Responsabilidad observada |
 |---|---|
@@ -47,6 +47,16 @@ Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el 
 | `AuraAIBrain` | Carga/valida el modelo local y coordina inferencia, cachés y reglas seguras. |
 | `AgentController` | Coordina órdenes, eventos y herramientas disponibles para la consola. |
 | `AuraTools` | Acciones como actualizar defensas, bloquear un dominio o solicitar aislamiento nativo. |
+
+### Estado de los cinco pilares de defensa
+
+| Pilar | Capacidades integradas | Alcance y limitaciones |
+|---|---|---|
+| 1. Entorno hostil | Detecciones nativas de root, gestores como Magisk/KernelSU, instrumentación, emuladores y señales de integridad. | Son heurísticas de defensa en dispositivo; no constituyen garantía contra evasión o manipulación del sistema. |
+| 2. Inventario de apps | `AuraAppGenomeScanner` evalúa aplicaciones instaladas, permisos sensibles, firmas y señales de ofuscación. | La visibilidad de paquetes depende de las políticas de visibilidad de Android y permisos disponibles. |
+| 3. Clasificación ML | Vector sincronizado Python/Dart de 18 características, incluyendo typosquatting, n-gramas y homógrafos IDN. | El modelo publicado (`3.0.0`) conserva el esquema entrenado de seis características; para aprovechar las doce nuevas se requiere reentrenar, validar y publicar un modelo compatible de 18 características. Las puntuaciones del bosque son votos, no probabilidades calibradas. |
+| 4. Red | Rutas TUN completas IPv4/IPv6, inspección TCP SNI, eventos para inferencia en Dart y bloqueo de UDP DNS cifrado hacia resolutores conocidos. | QUIC/DoQ no tiene extracción SNI; la cobertura depende de las IP conocidas y puede verse reducida por ECH u otros resolutores. La inspección se implementa en userspace, no con `iptables`/`ip6tables`. |
+| 5. Cadena de suministro | Workflow de SBOM CycloneDX y generación de provenance SLSA firmada mediante OIDC para artefactos Android. | El generador genérico de provenance no demuestra por sí solo todos los requisitos de construcción y fuente necesarios para afirmar conformidad SLSA Level 3 integral. |
 
 ### Contrato de características
 
