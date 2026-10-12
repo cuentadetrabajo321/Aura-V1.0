@@ -43,25 +43,51 @@ Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el 
 | `hev-socks5-tunnel` | Procesa tráfico encaminado por TUN; incluye la ruta DNS mapeada y código C/JNI. |
 | Firewall C / SNI | Reglas nativas de red y reporte de hosts/eventos al lado Flutter. |
 | `AuraNetworkAuditor` | Escucha eventos DNS tras autenticar la consola, mantiene una bitácora acotada y solicita inferencia para eventos bloqueados o DGA. |
-| `AuraAIInference` | Extrae hosts, calcula las seis características y evalúa el bosque en `Isolate.run`. |
+| `AuraAIInference` | Extrae hosts, calcula las 18 características y evalúa el bosque en `Isolate.run`. |
 | `AuraAIBrain` | Carga/valida el modelo local y coordina inferencia, cachés y reglas seguras. |
 | `AgentController` | Coordina órdenes, eventos y herramientas disponibles para la consola. |
 | `AuraTools` | Acciones como actualizar defensas, bloquear un dominio o solicitar aislamiento nativo. |
 
 ### Contrato de características
 
-El orden del vector está fijado por el modelo y Dart; no debe cambiarse sin una nueva compatibilidad de esquema:
+El vector conserva los seis valores originales en los mismos índices y agrega doce valores normalizados a `[0, 1]`. Python (`extract_enhanced_features`) y Dart (`AuraAIInference.extractEnhancedFeatures`) comparten el orden siguiente:
 
 | Índice | Campo JSON | Cálculo |
 |---:|---|---|
-| 0 | `length` | Longitud del host normalizado. |
+| 0 | `length` | Longitud del host normalizado (valor legado, sin reescalar). |
 | 1 | `shannon_entropy` | Entropía de Shannon de los caracteres del host. |
 | 2 | `digit_ratio` | Dígitos ASCII divididos por la longitud. |
 | 3 | `vowel_ratio` | Vocales ASCII (`a,e,i,o,u`) divididas por letras. |
 | 4 | `consonant_sequence_ratio` | Caracteres de rachas consonánticas de longitud ≥3, divididos por letras. |
 | 5 | `suspicious_tld` | `1.0` si el TLD pertenece al conjunto sospechoso del entrenador; si no, `0.0`. |
+| 6 | `min_normalized_levenshtein` | Menor distancia de Levenshtein frente al snapshot Tranco Top 1000 incluido, dividida por la longitud mayor entre host y candidato. |
+| 7 | `bigram_repeat_ratio` | Pares de caracteres repetidos, más allá de su primera aparición, dividido por el total de pares. |
+| 8 | `trigram_repeat_ratio` | Tripletes repetidos, más allá de su primera aparición, dividido por el total de tripletes. |
+| 9 | `subdomain_depth` | Número de puntos dividido por 126 (máximo compatible con un host DNS de 253 caracteres). |
+| 10 | `tld_length_ratio` | Longitud del TLD dividida por 63. |
+| 11 | `idn_homograph_indicator` | `1.0` cuando al menos dos caracteres cirílicos mapeados como confusables latinos aparecen en el host Unicode (incluidos labels Punycode decodificados); en otro caso, `0.0`. |
+| 12 | `non_ascii_ratio` | Caracteres no ASCII divididos por la longitud del host. |
+| 13 | `consecutive_digits_indicator` | Indicador binario de dos o más dígitos ASCII contiguos. |
+| 14 | `conditional_entropy` | Entropía de caracteres normalizada por longitud de cada etiqueta y ponderada por sus caracteres. |
+| 15 | `rare_character_ratio` | `q`, `x`, `z` y `k` ASCII divididos por el total de letras ASCII. |
+| 16 | `longest_label_length_ratio` | Longitud de la etiqueta más larga dividida por 63. |
+| 17 | `suspicious_keyword_indicator` | Indicador binario de `free`, `reward`, `update` o `system` en el host. |
+
+La función `detect_idn_homoglyphs` en Python y `AuraAIInference.detectIdnHomoglyphs` en Dart comparten el mapa cirílico `а→a`, `е→e`, `о→o`, `р→p`, `с→c`, `у→y`, `х→x`. El score es `min(cantidad / 2, 1)`: cero sin confusables, `0.5` con uno y `1.0` con dos o más; el campo del modelo marca sospechoso únicamente desde dos caracteres.
+
+Para typosquatting, `levenshtein_distance_to_top_domains` en Python y `AuraAIInference.levenshteinDistanceToTopDomains` en Dart retornan la mínima distancia de edición dividida por la longitud mayor del host y del dominio de referencia (`0.0` idéntico, hasta `1.0`). Ambos usan exactamente el snapshot de 1000 dominios citado arriba. `is_probable_typosquatting` / `AuraAIInference.isProbableTyposquatting` aplica el umbral de 1–2 ediciones; dominios idénticos no se clasifican como typosquatting. Ejemplo: `goggle.com` obtiene `0.1` frente a `google.com` y activa el umbral.
+
+Las seis primeras características conservan sus valores previos para no cambiar la escala del modelo existente; las doce agregadas son normalizadas. La lista común se versiona en `tool/domain_lists/tranco_top_1000_20261012.txt` (snapshot diario de [Tranco](https://tranco-list.eu/) del 12 de octubre de 2026) y se incorpora a Dart desde `lib/inference/aura_common_domains.dart`. El modelo publicado sigue usando sus características de entrenamiento originales: debe volver a entrenarse y publicarse con el vector de 18 valores para que los árboles puedan usar los índices nuevos.
 
 ## 2. Incisiones integradas
+
+### Inspección de DoH/DoQ e IPv6
+
+`AuraVpnService` instala rutas predeterminadas para IPv4 (`0.0.0.0/0`) e IPv6 (`::/0`), así que TCP y UDP ya atraviesan la interfaz TUN; `VpnService.Builder` no ofrece `addAllowedProtocol()`. El túnel inspecciona ClientHello TLS en TCP/443 y TCP/853 y remite el SNI observado, junto con la dirección y puerto de destino, a Dart por `EventChannel` como `SNI_OBSERVED`. Los hosts asociados a resolutores no se bloquean solo por aparecer en una lista fija: Dart los analiza con el modelo. El evento incluye `public_dns_resolver` para las direcciones públicas IPv4/IPv6 reconocidas.
+
+Como el parser TLS no puede leer SNI de QUIC, el firewall bloquea UDP/853 y UDP/443 dirigido a las IP conocidas de resolutores DoH, y emite `ENCRYPTED_DNS_BLOCKED` con el endpoint y protocolo. No se afirma inspección SNI de QUIC/DoQ; resolutores DoH por direcciones IP no incluidas en la lista y técnicas TLS como ECH pueden limitar la detección.
+
+El transporte HEV procesa ambos tipos de paquete IP, prefiere resolver destinos mediante `AF_INET6` y recurre a `AF_INET` si no hay resultado IPv6. El feed de bloqueo y el filtro nativo admiten direcciones IPv4 e IPv6. El firewall es userspace sobre paquetes TUN; no invoca `iptables`/`ip6tables`, que requieren privilegios de sistema y no forman parte de un `VpnService` ordinario. SNI observado desde destinos IPv6 conserva la dirección IPv6 numérica en el evento. Las direcciones IP se normalizan en Dart para el registro, pero no se puntúan como nombres de dominio en el modelo ML.
 
 La numeración de incisiones no está representada por tags Git. La tabla relaciona las etiquetas solicitadas con grupos de commits y merges que sí aparecen en el historial de `main`; para #4/#4b, la asignación se basa en la secuencia de commits, no en refs Git llamadas así.
 
@@ -77,7 +103,7 @@ Merges posteriores también están en `main`: arreglo de `hashFiles()` inválido
 
 ## 3. Brain v2
 
-Asset publicado: [`assets/model/aura_brain_model.json`](assets/model/aura_brain_model.json). Esquema: `random_forest`, clases `safe`/`threat` y seis características documentadas arriba.
+Asset publicado: [`assets/model/aura_brain_model.json`](assets/model/aura_brain_model.json). Esquema actual: `random_forest`, clases `safe`/`threat` y seis características originales. El nuevo vector de 18 campos está listo para el próximo entrenamiento; el asset publicado no se regenera sin los splits de entrenamiento versionados.
 
 | Propiedad | Valor real |
 |---|---:|
@@ -167,9 +193,12 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g
 
 | Workflow | Propósito | Triggers |
 |---|---|---|
-| `release-signing-integrity.yml` | Verifica credenciales requeridas, ausencia de firma debug y ruta positiva con keystore efímero. | PR/push a `main` cuando cambia Gradle, `tool/compile_aura.sh` o el workflow; `workflow_dispatch`. |
+| `release-signing-integrity.yml` | Verifica firma de release y genera `sbom.json` CycloneDX con Syft para Dart (`pubspec.lock`), Android (lockfile Gradle) y Python (`tool/requirements*.txt`); publica el SBOM como artefacto `aura-cyclonedx-sbom`. | PR/push a `main` cuando cambian archivos Gradle, `pubspec.*`, requirements o el workflow; `workflow_dispatch`. |
+| `android-release.yml` | Compila y verifica APK/AAB, genera provenance SLSA firmada por OIDC (`.intoto.jsonl`) y publica APK/AAB más provenance en Releases para tags `v*`; conserva un artefacto combinado. | Push a `main`/`principal`, tags `v*` o `workflow_dispatch`. |
 | `model-training.yml` | Instala Python, construye dataset, entrena, benchmark, pytest y publica reportes de CI. | PR y push a `main` para cambios `tool/**`, `data/**` o workflow; `workflow_dispatch`. |
 | `deploy-model-pages.yml` | Publica JSON, SHA-256 y firma en Pages. | Push a `main` al cambiar workflow o los tres assets; `workflow_dispatch`. |
+
+El job `slsa-provenance` usa el generador genérico SLSA v1.2.2: el builder aislado firma el digest SHA-256 del artefacto con identidad OIDC y publica la attestation `.intoto.jsonl`. Para tags `v*`, la provenance y el APK/AAB se adjuntan a GitHub Release; en `workflow_dispatch` se puede elegir APK/AAB y opcionalmente indicar un tag de Release ya existente. Este generador produce provenance de nivel SLSA 3, pero es provenance-only: por sí solo no certifica todos los requisitos de fuente y construcción de un sistema SLSA Level 3 completo.
 
 ## 7. Codemagic
 
@@ -314,7 +343,7 @@ Pendientes propuestos, no funciones completadas:
 - Incisión #6: Aura Agéntica (registro de herramientas y clasificador de intenciones).
 - Incisión #7: Suite 3D / núcleo neuronal holográfico.
 - Revisar permisos y manifiesto para Android 14+ y APIs 34/36; el build actual declara `compileSdk 36` y `targetSdk 36`.
-- Evaluar cobertura DoH, DoQ e IPv6; la inspección actual no cubre universalmente esos transportes/resolvers.
+- Ampliar y validar en dispositivos reales la cobertura DoH/DoQ, QUIC, ECH y resolutores fuera de las direcciones conocidas.
 - Refactor de nombres de `AuraAIInference` y clases relacionadas manteniendo contrato/tests.
 - Añadir cobertura de tests reproducible y benchmark en dispositivos reales.
 
@@ -976,7 +1005,10 @@ jobs:
         uses: actions/deploy-pages@v4
 ```
 
-### `tool/train_max_aura_brain.py` (primeras 150 líneas)
+### `tool/train_max_aura_brain.py` (extractor original de seis características)
+
+El fragmento siguiente conserva el baseline histórico de Brain v2. Para el vector activo de 18 características, consulte [`extract_enhanced_features`](./tool/train_max_aura_brain.py) y el contrato de esta sección.
+
 ```python
 import argparse
 import csv

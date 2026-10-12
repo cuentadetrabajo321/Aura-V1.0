@@ -14,6 +14,7 @@
 #include <string.h>
 
 #include <lwip/tcp.h>
+#include <lwip/ip_addr.h>
 
 #include <hev-task.h>
 #include <hev-task-io.h>
@@ -37,6 +38,9 @@
 extern void hev_jni_report_dns_event (const char *domain, int action,
                                       uint32_t source_ipv4,
                                       uint16_t source_port);
+extern void hev_jni_report_sni_event (const char *domain,
+                                      const char *destination_address,
+                                      uint16_t destination_port);
 
 static void
 report_blocked_sni (HevSocks5SessionTCP *self, const char *sni)
@@ -49,6 +53,20 @@ report_blocked_sni (HevSocks5SessionTCP *self, const char *sni)
         hev_jni_report_dns_event (sni, 3, source_ipv4,
                                   self->pcb->remote_port);
     }
+}
+
+static void
+report_observed_sni (HevSocks5SessionTCP *self, const char *sni)
+{
+    char destination_address[IP6ADDR_STRLEN_MAX] = { 0 };
+
+    if (!sni || !sni[0] || !self->pcb)
+        return;
+    if (!ipaddr_ntoa_r (&self->pcb->local_ip, destination_address,
+                        sizeof (destination_address)))
+        return;
+    hev_jni_report_sni_event (sni, destination_address,
+                              self->pcb->local_port);
 }
 
 static int
@@ -98,6 +116,7 @@ tls_inspection_append (HevSocks5SessionTCP *self, const struct pbuf *p)
         return -1;
     }
 
+    report_observed_sni (self, sni);
     self->tls_inspection_complete = 1;
     return 1;
 }

@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:isolate';
-import 'dart:math' as math;
 import 'dart:io';
+
+import '../inference/aura_ai_inference.dart' as shared_features;
 
 class AuraInferenceResult {
   const AuraInferenceResult({
@@ -89,7 +90,9 @@ abstract final class AuraAIInference {
     Map<String, dynamic> modelStructure,
     List<String> suspiciousTlds,
   ) {
-    final hosts = _extractHosts(rawData);
+    final hosts = _extractHosts(rawData)
+        .where((host) => InternetAddress.tryParse(host) == null)
+        .toList(growable: false);
     if (hosts.isEmpty) return <String, Object?>{'results': <Object?>[]};
 
     final trees = modelStructure['trees'];
@@ -101,7 +104,12 @@ abstract final class AuraAIInference {
     final suspicious = suspiciousTlds.map((tld) => tld.toLowerCase()).toSet();
     final results = <Map<String, Object?>>[];
     for (final host in hosts) {
-      final features = _extractFeatures(host, suspicious);
+      final features =
+          shared_features.AuraAIInference.extractEnhancedFeatures(host);
+      features[5] =
+          suspicious.contains(host.substring(host.lastIndexOf('.') + 1))
+              ? 1.0
+              : 0.0;
       var threatVotes = 0;
       for (final tree in trees) {
         if (tree is! Map || !tree.containsKey('root')) {
@@ -122,6 +130,11 @@ abstract final class AuraAIInference {
           'vowel_ratio': features[3],
           'consonant_sequence_ratio': features[4],
           'suspicious_tld': features[5],
+          for (var index = 6;
+              index < shared_features.AuraAIInference.enhancedFeatureOrder.length;
+              index++)
+            shared_features.AuraAIInference.enhancedFeatureOrder[index]:
+                features[index],
           'maximum_consonant_streak': maximumConsonantStreak.toDouble(),
           'maximum_consonant_streak_ratio':
               host.isEmpty
@@ -135,6 +148,15 @@ abstract final class AuraAIInference {
 
   static List<String> _extractHosts(String rawData) {
     final hosts = <String>{};
+    var rawAddressInput = rawData.trim();
+    if (rawAddressInput.startsWith('[') && rawAddressInput.endsWith(']')) {
+      rawAddressInput =
+          rawAddressInput.substring(1, rawAddressInput.length - 1);
+    }
+    final rawAddress = InternetAddress.tryParse(rawAddressInput);
+    if (rawAddress != null) {
+      return <String>[rawAddress.address.toLowerCase()];
+    }
     try {
       _collectHosts(jsonDecode(rawData), hosts);
     } on FormatException {
@@ -183,96 +205,26 @@ abstract final class AuraAIInference {
       }
       candidate = uri.host.toLowerCase();
     } else {
-          if (candidate.contains('/') ||
-            candidate.contains('\\') ||
-            candidate.contains('?') ||
-            candidate.contains('#') ||
-            candidate.contains('@') ||
-            candidate.contains(':') ||
-            candidate.contains('%')) {
+      if (candidate.contains('/') ||
+          candidate.contains('\\') ||
+          candidate.contains('?') ||
+          candidate.contains('#') ||
+          candidate.contains('@') ||
+          candidate.contains('%')) {
         return null;
       }
     }
+    if (candidate.startsWith('[') && candidate.endsWith(']')) {
+      candidate = candidate.substring(1, candidate.length - 1);
+    }
+    final address = InternetAddress.tryParse(candidate);
+    if (address != null) return address.address.toLowerCase();
+    if (candidate.contains(':')) return null;
     if (candidate.endsWith('.')) {
       candidate = candidate.substring(0, candidate.length - 1);
     }
-    if (!_hostnamePattern.hasMatch(candidate) ||
-        InternetAddress.tryParse(candidate) != null) {
-      return null;
-    }
+    if (!_hostnamePattern.hasMatch(candidate)) return null;
     return candidate;
-  }
-
-  static List<double> _extractFeatures(
-    String host,
-    Set<String> suspiciousTlds,
-  ) {
-    final characters = host.runes.toList(growable: false);
-    final length = characters.length;
-    if (length == 0) return List<double>.filled(6, 0);
-
-    var digits = 0;
-    var vowels = 0;
-    var letterCount = 0;
-    var currentConsonantRun = 0;
-    var maximumConsonantRun = 0;
-    var consonantSequenceCharacters = 0;
-    for (final character in characters) {
-      if (_isAsciiDigit(character)) digits++;
-      if (_isAsciiLetter(character)) {
-        letterCount++;
-        final lower = character | 0x20;
-        if (_isVowel(lower)) {
-          vowels++;
-          if (currentConsonantRun >= 3) {
-            consonantSequenceCharacters += currentConsonantRun;
-          }
-          currentConsonantRun = 0;
-        } else {
-          currentConsonantRun++;
-          if (currentConsonantRun > maximumConsonantRun) {
-            maximumConsonantRun = currentConsonantRun;
-          }
-        }
-      } else {
-        if (currentConsonantRun >= 3) {
-          consonantSequenceCharacters += currentConsonantRun;
-        }
-        currentConsonantRun = 0;
-      }
-    }
-    if (currentConsonantRun >= 3) {
-      consonantSequenceCharacters += currentConsonantRun;
-    }
-
-    final lettersDenominator = letterCount == 0 ? 1 : letterCount;
-    final tld = host.substring(host.lastIndexOf('.') + 1);
-    return <double>[
-      length.toDouble(),
-      _shannonEntropy(host),
-      digits / length,
-      letterCount == 0 ? 0 : vowels / lettersDenominator,
-      letterCount == 0
-          ? 0
-          : consonantSequenceCharacters / lettersDenominator,
-      suspiciousTlds.contains(tld) ? 1 : 0,
-    ];
-  }
-
-  static double _shannonEntropy(String host) {
-    if (host.isEmpty) return 0;
-    final frequencies = <int, int>{};
-    final characters = host.toLowerCase().runes.toList(growable: false);
-    for (final character in characters) {
-      frequencies.update(character, (count) => count + 1, ifAbsent: () => 1);
-    }
-    final length = characters.length;
-    var entropy = 0.0;
-    for (final count in frequencies.values) {
-      final probability = count / length;
-      entropy -= probability * (math.log(probability) / math.ln2);
-    }
-    return entropy;
   }
 
   static int _maximumConsonantStreak(String host) {
@@ -323,9 +275,6 @@ abstract final class AuraAIInference {
   static bool _isAsciiLetter(int character) =>
       (character >= 65 && character <= 90) ||
       (character >= 97 && character <= 122);
-
-  static bool _isAsciiDigit(int character) =>
-      character >= 48 && character <= 57;
 
   static bool _isVowel(int character) =>
       character == 0x61 ||

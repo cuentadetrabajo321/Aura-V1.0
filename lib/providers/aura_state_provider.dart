@@ -91,7 +91,7 @@ class AuraStateProvider extends ChangeNotifier {
   void addTelemetryEvent(Map<String, dynamic> event) {
     _telemetryEvents.add(Map<String, dynamic>.unmodifiable(event));
     _lastNetworkAction = event['action'] as String?;
-    if (event['requested_domain'] == 'DoH/DoT Bypass Attempt') {
+    if (event['action'] == 'ENCRYPTED_DNS_BLOCKED') {
       _encryptedDnsBlocks++;
     }
     if (_telemetryEvents.length > maxTelemetryEvents) {

@@ -24,6 +24,7 @@ import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import android.view.MotionEvent
 import hev.htproxy.TProxyService
 import com.aura.cyberdefense.AuraCryptoSecure
 import com.aura.cyberdefense.AuraNotificationService
@@ -175,6 +176,12 @@ class MainActivity: FlutterFragmentActivity() {
     private var pendingNotificationResult: MethodChannel.Result? = null
     private var pendingNotificationPayload: Pair<String, String>? = null
     private var vpnReceiverRegistered = false
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        AuraHostileEnvironment.recordObscuredTouch(event)
+        return super.dispatchTouchEvent(event)
+    }
+
     private val vpnStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             val started = intent?.getBooleanExtra("started", false) ?: false
@@ -511,7 +518,22 @@ class MainActivity: FlutterFragmentActivity() {
         ).setMethodCallHandler { call, result ->
             when (call.method) {
                 "checkHostileEnvironment" -> {
-                    result.success(AuraHostileEnvironment.inspect())
+                    genomeScannerExecutor.execute {
+                        try {
+                            val environmentReport =
+                                AuraHostileEnvironment.inspect(applicationContext)
+                            runOnUiThread { result.success(environmentReport) }
+                        } catch (exception: Exception) {
+                            runOnUiThread {
+                                result.error(
+                                    "HOSTILE_ENVIRONMENT_CHECK_FAILED",
+                                    exception.message
+                                        ?: "No se pudo completar el análisis del entorno.",
+                                    null,
+                                )
+                            }
+                        }
+                    }
                 }
 
                 "scanActiveSensitiveServices" -> {

@@ -9,6 +9,7 @@ import android.system.OsConstants
 import io.flutter.plugin.common.EventChannel
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.UnknownHostException
 import java.util.ArrayDeque
 import java.util.concurrent.Executors
 
@@ -18,6 +19,10 @@ private data class PendingDnsEvent(
     val action: String,
     val sourceAddress: String,
     val sourcePort: Int,
+    val destinationAddress: String? = null,
+    val destinationPort: Int? = null,
+    val transportProtocol: String? = null,
+    val publicDnsResolver: Boolean = false,
     val generation: Long,
 )
 
@@ -86,12 +91,12 @@ object AuraNetworkStream : EventChannel.StreamHandler {
             if (pendingDnsEvents.size == MAX_PENDING_EVENTS) pendingDnsEvents.removeFirst()
             pendingDnsEvents.addLast(
                 PendingDnsEvent(
-                    System.currentTimeMillis(),
-                    domain,
-                    action,
-                    sourceAddress,
-                    sourcePort,
-                    eventGeneration,
+                    timestamp = System.currentTimeMillis(),
+                    domain = domain,
+                    action = action,
+                    sourceAddress = sourceAddress,
+                    sourcePort = sourcePort,
+                    generation = eventGeneration,
                 ),
             )
             if (!resolverScheduled) {
@@ -110,6 +115,64 @@ object AuraNetworkStream : EventChannel.StreamHandler {
         }
     }
 
+    fun emitSniEvent(domain: String, destinationAddress: String, destinationPort: Int) {
+        enqueueEvent(
+            PendingDnsEvent(
+                timestamp = System.currentTimeMillis(),
+                domain = domain,
+                action = "SNI_OBSERVED",
+                sourceAddress = "",
+                sourcePort = 0,
+                destinationAddress = destinationAddress,
+                destinationPort = destinationPort,
+                transportProtocol = "TCP",
+                publicDnsResolver = isPublicDnsResolver(destinationAddress),
+                generation = synchronized(lock) { eventGeneration },
+            ),
+        )
+    }
+
+    fun emitEncryptedDnsEvent(
+        destinationAddress: String,
+        destinationPort: Int,
+        transportProtocol: String,
+    ) {
+        enqueueEvent(
+            PendingDnsEvent(
+                timestamp = System.currentTimeMillis(),
+                domain = "Encrypted DNS attempt",
+                action = "ENCRYPTED_DNS_BLOCKED",
+                sourceAddress = "",
+                sourcePort = 0,
+                destinationAddress = destinationAddress,
+                destinationPort = destinationPort,
+                transportProtocol = transportProtocol,
+                publicDnsResolver = isPublicDnsResolver(destinationAddress),
+                generation = synchronized(lock) { eventGeneration },
+            ),
+        )
+    }
+
+    private fun enqueueEvent(event: PendingDnsEvent) {
+        synchronized(lock) {
+            if (pendingDnsEvents.size == MAX_PENDING_EVENTS) pendingDnsEvents.removeFirst()
+            pendingDnsEvents.addLast(event)
+            if (!resolverScheduled) {
+                resolverScheduled = true
+                uidResolver.execute(::resolveQueuedEvents)
+            }
+        }
+    }
+
+    private fun isPublicDnsResolver(address: String): Boolean {
+        val candidate = try {
+            InetAddress.getByName(address).address
+        } catch (_: UnknownHostException) {
+            return false
+        }
+        return PUBLIC_DNS_RESOLVER_ADDRESSES.any { candidate.contentEquals(it) }
+    }
+
     private fun resolveQueuedEvents() {
         while (true) {
             val pending = synchronized(lock) {
@@ -121,12 +184,26 @@ object AuraNetworkStream : EventChannel.StreamHandler {
                 }
             } ?: return
 
-            val event = mapOf(
-                "timestamp" to pending.timestamp,
-                "source_app" to resolveSourceApp(pending.sourceAddress, pending.sourcePort),
-                "requested_domain" to pending.domain,
-                "action" to pending.action,
-            )
+            val event = buildMap<String, Any> {
+                put(
+                    "source_app",
+                    if (pending.action == "SNI_OBSERVED" ||
+                        pending.action == "ENCRYPTED_DNS_BLOCKED"
+                    ) "uid-unavailable" else resolveSourceApp(
+                        pending.sourceAddress,
+                        pending.sourcePort,
+                    ),
+                )
+                put("timestamp", pending.timestamp)
+                put("requested_domain", pending.domain)
+                put("action", pending.action)
+                pending.destinationAddress?.let { put("destination_address", it) }
+                pending.destinationPort?.let { put("destination_port", it) }
+                pending.transportProtocol?.let { put("transport_protocol", it) }
+                if (pending.destinationAddress != null) {
+                    put("public_dns_resolver", pending.publicDnsResolver)
+                }
+            }
             val queued = synchronized(lock) {
                 if (pending.generation != eventGeneration) {
                     false
@@ -172,6 +249,15 @@ object AuraNetworkStream : EventChannel.StreamHandler {
         drainScheduled = true
         mainHandler.post(::drainOne)
     }
+
+    private val PUBLIC_DNS_RESOLVER_ADDRESSES = listOf(
+        "1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9",
+        "149.112.112.112", "208.67.222.222", "208.67.220.220",
+        "94.140.14.14", "94.140.15.15", "2606:4700:4700::1111",
+        "2606:4700:4700::1001", "2001:4860:4860::8888",
+        "2001:4860:4860::8844", "2620:fe::fe", "2620:fe::9",
+        "2620:119:35::35", "2620:119:35::53",
+    ).map { InetAddress.getByName(it).address }
 
     private fun drainOne() {
         val sink: EventChannel.EventSink?

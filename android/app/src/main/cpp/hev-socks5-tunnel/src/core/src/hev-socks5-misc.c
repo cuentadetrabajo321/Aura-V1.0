@@ -262,13 +262,22 @@ hev_socks5_name_resolve_name (const char *name, struct sockaddr_in6 *saddr,
     struct addrinfo hints = { 0 };
     int res = 0;
 
-    hints.ai_family = *family;
+    hints.ai_family = AF_INET6;
     hints.ai_socktype = SOCK_STREAM;
 
-    hev_task_dns_getaddrinfo (name, NULL, &hints, &result);
-    if (!result)
-        return -1;
+    res = hev_task_dns_getaddrinfo (name, NULL, &hints, &result);
+    if (res != 0 || !result) {
+        if (result) {
+            freeaddrinfo (result);
+            result = NULL;
+        }
+        hints.ai_family = AF_INET;
+        res = hev_task_dns_getaddrinfo (name, NULL, &hints, &result);
+        if (res != 0 || !result)
+            return -1;
+    }
 
+    res = 0;
     switch (result->ai_family) {
     case AF_INET: {
         struct sockaddr_in *sa = (struct sockaddr_in *)result->ai_addr;

@@ -645,8 +645,14 @@ String _normalizeDomain(String input) {
     candidate = Uri.tryParse(candidate)?.host ?? candidate;
   } else {
     candidate = candidate.split('/').first;
-    candidate = candidate.split(':').first;
   }
+  if (candidate.startsWith('[') && candidate.endsWith(']')) {
+    candidate = candidate.substring(1, candidate.length - 1);
+  }
+  final address = InternetAddress.tryParse(candidate);
+  if (address != null) return address.address.toLowerCase();
+  if (candidate.contains(':')) return '';
+  candidate = candidate.split(':').first;
   return candidate.replaceFirst(RegExp(r'\.$'), '');
 }
 

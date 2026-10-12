@@ -8,7 +8,13 @@ import 'package:flutter/services.dart';
 import 'ai_brain.dart';
 import 'secure_vault.dart';
 
-enum NetworkAuditAction { blocked, dgaAlert, allowed }
+enum NetworkAuditAction {
+  blocked,
+  dgaAlert,
+  allowed,
+  sniObserved,
+  encryptedDnsBlocked,
+}
 
 class NetworkAuditEvent {
   const NetworkAuditEvent({
@@ -16,12 +22,20 @@ class NetworkAuditEvent {
     required this.sourceApp,
     required this.requestedDomain,
     required this.action,
+    this.destinationAddress,
+    this.destinationPort,
+    this.transportProtocol,
+    this.publicDnsResolver = false,
   });
 
   final int timestamp;
   final String sourceApp;
   final String requestedDomain;
   final NetworkAuditAction action;
+  final String? destinationAddress;
+  final int? destinationPort;
+  final String? transportProtocol;
+  final bool publicDnsResolver;
 
   factory NetworkAuditEvent.fromPlatform(Object? value) {
     if (value is! Map) {
@@ -32,9 +46,27 @@ class NetworkAuditEvent {
     final sourceApp = value['source_app'];
     final requestedDomain = value['requested_domain'];
     final action = value['action'];
+    final destinationAddress = value['destination_address'];
+    final destinationPort = value['destination_port'];
+    final transportProtocol = value['transport_protocol'];
+    final publicDnsResolver = value['public_dns_resolver'];
+    final normalizedDestination = destinationAddress is String
+        ? _normalizeIpAddress(destinationAddress)
+        : null;
     if (timestamp is! num || sourceApp is! String ||
       requestedDomain is! String ||
-      (action != 'BLOCKED' && action != 'DGA_ALERT' && action != 'ALLOWED')) {
+      (action != 'BLOCKED' && action != 'DGA_ALERT' && action != 'ALLOWED' &&
+          action != 'SNI_OBSERVED' && action != 'ENCRYPTED_DNS_BLOCKED') ||
+      (destinationAddress != null && destinationAddress is! String) ||
+      (destinationAddress is String && normalizedDestination == null) ||
+      (destinationPort != null &&
+          (destinationPort is! num ||
+              !destinationPort.isFinite ||
+              destinationPort % 1 != 0 ||
+              destinationPort < 1 ||
+              destinationPort > 65535)) ||
+      (transportProtocol != null && transportProtocol is! String) ||
+      (publicDnsResolver != null && publicDnsResolver is! bool)) {
       throw const FormatException('El evento de red tiene campos inválidos.');
     }
 
@@ -42,24 +74,53 @@ class NetworkAuditEvent {
       timestamp: timestamp.toInt(),
       sourceApp: sourceApp,
       requestedDomain: requestedDomain,
+      destinationAddress: normalizedDestination,
+      destinationPort: (destinationPort as num?)?.toInt(),
+      transportProtocol: transportProtocol as String?,
+      publicDnsResolver: publicDnsResolver as bool? ?? false,
       action: switch (action) {
         'BLOCKED' => NetworkAuditAction.blocked,
         'DGA_ALERT' => NetworkAuditAction.dgaAlert,
+        'SNI_OBSERVED' => NetworkAuditAction.sniObserved,
+        'ENCRYPTED_DNS_BLOCKED' => NetworkAuditAction.encryptedDnsBlocked,
         _ => NetworkAuditAction.allowed,
       },
     );
   }
 
-  Map<String, Object> toJson() => {
-        'timestamp': timestamp,
-        'source_app': sourceApp,
-        'requested_domain': requestedDomain,
-        'action': switch (action) {
-          NetworkAuditAction.blocked => 'BLOCKED',
-          NetworkAuditAction.dgaAlert => 'DGA_ALERT',
-          NetworkAuditAction.allowed => 'ALLOWED',
-        },
-      };
+  Map<String, Object> toJson() {
+    final value = <String, Object>{
+      'timestamp': timestamp,
+      'source_app': sourceApp,
+      'requested_domain': requestedDomain,
+      'action': switch (action) {
+        NetworkAuditAction.blocked => 'BLOCKED',
+        NetworkAuditAction.dgaAlert => 'DGA_ALERT',
+        NetworkAuditAction.allowed => 'ALLOWED',
+        NetworkAuditAction.sniObserved => 'SNI_OBSERVED',
+        NetworkAuditAction.encryptedDnsBlocked => 'ENCRYPTED_DNS_BLOCKED',
+      },
+      'public_dns_resolver': publicDnsResolver,
+    };
+    if (destinationAddress case final address?) {
+      value['destination_address'] = address;
+    }
+    if (destinationPort case final port?) {
+      value['destination_port'] = port;
+    }
+    if (transportProtocol case final protocol?) {
+      value['transport_protocol'] = protocol;
+    }
+    return value;
+  }
+}
+
+String? _normalizeIpAddress(String input) {
+  var candidate = input.trim();
+  if (candidate.startsWith('[') && candidate.endsWith(']')) {
+    candidate = candidate.substring(1, candidate.length - 1);
+  }
+  return InternetAddress.tryParse(candidate)?.address;
 }
 
 class AuraNetworkAuditor {
@@ -167,7 +228,8 @@ class AuraNetworkAuditor {
     _eventController.add(event);
 
     if (event.action == NetworkAuditAction.blocked ||
-        event.action == NetworkAuditAction.dgaAlert) {
+        event.action == NetworkAuditAction.dgaAlert ||
+        event.action == NetworkAuditAction.sniObserved) {
       if (_pendingThreatEvents.length < 64) {
         _pendingThreatEvents.addLast(event);
       }
@@ -202,8 +264,8 @@ class AuraNetworkAuditor {
         final event = _pendingThreatEvents.removeFirst();
         try {
           await _aiBrain.analyzeThreatPayload(jsonEncode(event.toJson()));
-        } catch (_) {
-          // Keep the local event even if remote analysis is unavailable.
+        } catch (error, stackTrace) {
+          if (!_disposed) _eventController.addError(error, stackTrace);
         }
       }
     } finally {

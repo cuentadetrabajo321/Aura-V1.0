@@ -4,17 +4,27 @@ import hashlib
 import json
 import math
 import os
+import re
 import tempfile
 import time
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
+from rapidfuzz.distance import Levenshtein
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.tree import _tree
 
 ROOT = Path(__file__).resolve().parents[1]
+COMMON_DOMAINS_PATH = ROOT / "tool/domain_lists/tranco_top_1000_20261012.txt"
+COMMON_DOMAINS = tuple(
+    COMMON_DOMAINS_PATH.read_text(encoding="ascii").splitlines()
+)
+if len(COMMON_DOMAINS) != 1000 or len(set(COMMON_DOMAINS)) != 1000:
+    raise ValueError(f"{COMMON_DOMAINS_PATH} must contain 1000 unique domains")
+MODEL_VERSION = "4.0.0"
 FEATURE_ORDER = [
     "length",
     "shannon_entropy",
@@ -22,6 +32,18 @@ FEATURE_ORDER = [
     "vowel_ratio",
     "consonant_sequence_ratio",
     "suspicious_tld",
+    "min_normalized_levenshtein",
+    "bigram_repeat_ratio",
+    "trigram_repeat_ratio",
+    "subdomain_depth",
+    "tld_length_ratio",
+    "idn_homograph_indicator",
+    "non_ascii_ratio",
+    "consecutive_digits_indicator",
+    "conditional_entropy",
+    "rare_character_ratio",
+    "longest_label_length_ratio",
+    "suspicious_keyword_indicator",
 ]
 SUSPICIOUS_TLDS = {
     "cam", "click", "country", "date", "download", "fit", "gq", "loan",
@@ -73,11 +95,113 @@ def calculate_shannon_entropy(domain_string):
     )
 
 
-def extract_maximum_features(domain):
+IDN_CONFUSABLES = {
+    "а": "a",
+    "е": "e",
+    "о": "o",
+    "р": "p",
+    "с": "c",
+    "у": "y",
+    "х": "x",
+}
+_SUSPICIOUS_KEYWORDS = ("free", "reward", "update", "system")
+_RARE_CHARACTERS = frozenset("qxzk")
+
+
+@lru_cache(maxsize=65536)
+def _minimum_top_domain_distance(host):
+    closest_distance = math.inf
+    closest_normalized_distance = 1.0
+    for common_domain in COMMON_DOMAINS:
+        length_difference = abs(len(host) - len(common_domain))
+        denominator = max(len(host), len(common_domain))
+        normalized_lower_bound = length_difference / denominator
+        if (
+            length_difference >= closest_distance
+            and normalized_lower_bound >= closest_normalized_distance
+        ):
+            continue
+        distance = Levenshtein.distance(host, common_domain)
+        normalized_distance = distance / denominator
+        if distance < closest_distance:
+            closest_distance = distance
+        if normalized_distance < closest_normalized_distance:
+            closest_normalized_distance = normalized_distance
+        if closest_distance == 0 and closest_normalized_distance == 0:
+            break
+    return closest_distance, closest_normalized_distance
+
+
+def levenshtein_distance_to_top_domains(domain):
+    """Return minimum edit distance / longer domain length, in [0, 1]."""
+    host = normalize_domain(domain)
+    if not host:
+        return 1.0
+    _, normalized_distance = _minimum_top_domain_distance(host)
+    return normalized_distance
+
+
+def is_probable_typosquatting(domain):
+    """Return whether the nearest popular domain is one or two edits away."""
+    host = normalize_domain(domain)
+    if not host:
+        return False
+    distance, _ = _minimum_top_domain_distance(host)
+    return 0 < distance <= 2
+
+
+def _minimum_normalized_levenshtein(host):
+    return levenshtein_distance_to_top_domains(host)
+
+
+def _repeated_ngram_ratio(value, size):
+    grams = [
+        value[index:index + size]
+        for index in range(max(0, len(value) - size + 1))
+    ]
+    if not grams:
+        return 0.0
+    return (len(grams) - len(set(grams))) / len(grams)
+
+
+def _conditional_label_entropy(labels):
+    character_count = 0
+    weighted_entropy = 0.0
+    for label in labels:
+        if not label:
+            continue
+        character_count += len(label)
+        entropy = calculate_shannon_entropy(label)
+        maximum_entropy = math.log2(len(label)) if len(label) > 1 else 0.0
+        if maximum_entropy:
+            weighted_entropy += len(label) * entropy / maximum_entropy
+    return weighted_entropy / character_count if character_count else 0.0
+
+
+def detect_idn_homoglyphs(domain):
+    """Return a 0–1 confusable score; two or more confusables saturate it."""
+    candidate = normalize_domain(domain)
+    if not candidate:
+        return 0.0
+
+    confusable_count = 0
+    for label in candidate.split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except UnicodeError:
+                continue
+        confusable_count += sum(
+            character in IDN_CONFUSABLES for character in label.lower()
+        )
+    return min(confusable_count / 2.0, 1.0)
+
+
+def extract_enhanced_features(domain):
     host = normalize_domain(domain)
     length = len(host)
     if length == 0:
-        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        return [0.0] * len(FEATURE_ORDER)
 
     letters = [character for character in host if character.isascii() and character.isalpha()]
     digits = sum(character.isascii() and character.isdigit() for character in host)
@@ -95,7 +219,13 @@ def extract_maximum_features(domain):
     if run_length >= 3:
         consonant_sequence_characters += run_length
 
-    tld = host.rsplit(".", 1)[-1]
+    labels = host.split(".")
+    tld = labels[-1]
+    bigram_ratio = _repeated_ngram_ratio(host, 2)
+    trigram_ratio = _repeated_ngram_ratio(host, 3)
+    non_ascii_ratio = sum(not character.isascii() for character in host) / length
+    ascii_letters = [character for character in host if character.isascii() and character.isalpha()]
+
     return [
         float(length),
         calculate_shannon_entropy(host),
@@ -103,7 +233,28 @@ def extract_maximum_features(domain):
         vowels / letter_count if letter_count else 0.0,
         consonant_sequence_characters / letter_count if letter_count else 0.0,
         float(tld in SUSPICIOUS_TLDS),
+        levenshtein_distance_to_top_domains(host),
+        bigram_ratio,
+        trigram_ratio,
+        min(host.count("."), 126) / 126,
+        min(len(tld), 63) / 63,
+        float(detect_idn_homoglyphs(host) >= 1.0),
+        non_ascii_ratio,
+        float(bool(re.search(r"[0-9]{2,}", host))),
+        _conditional_label_entropy(labels),
+        (
+            sum(character in _RARE_CHARACTERS for character in ascii_letters)
+            / len(ascii_letters)
+            if ascii_letters
+            else 0.0
+        ),
+        min(max(map(len, labels)), 63) / 63,
+        float(any(keyword in host for keyword in _SUSPICIOUS_KEYWORDS)),
     ]
+
+
+def extract_maximum_features(domain):
+    return extract_enhanced_features(domain)
 
 
 def read_split(path):
@@ -293,7 +444,7 @@ def train_mobile_preset():
         training_seconds = time.perf_counter() - training_started
         model = {
             "model_name": "Aura Lexical Threat Forest",
-            "model_version": "3.0.0",
+            "model_version": MODEL_VERSION,
             "model_type": "random_forest",
             "training_status": "heuristic_seed_with_csv",
             "training_samples": len(train_rows),
@@ -496,7 +647,7 @@ def main():
 
     model = {
         "model_name": "Aura Lexical Threat Forest",
-        "model_version": "3.0.0",
+        "model_version": MODEL_VERSION,
         "model_type": "random_forest",
         "training_status": "heuristic_seed" if using_seed_fallback else "heuristic_seed_with_csv",
         "training_samples": len(training_rows),

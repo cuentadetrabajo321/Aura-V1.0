@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <arpa/inet.h>
 
 #include <lwip/tcp.h>
 #include <lwip/udp.h>
@@ -47,6 +48,9 @@
 extern void hev_jni_report_dns_event (const char *domain, int action,
                                       uint32_t source_ipv4,
                                       uint16_t source_port);
+extern void hev_jni_report_encrypted_dns_event (
+    const char *destination_address, uint16_t destination_port,
+    const char *transport_protocol);
 #endif
 
 enum
@@ -73,8 +77,11 @@ static atomic_size_t stat_rx_bytes;
 static struct netif *netif;
 
 #define MAX_BLOCKED_IPV4 8192
+#define MAX_BLOCKED_IPV6 8192
 static uint32_t blocked_ipv4[MAX_BLOCKED_IPV4];
 static size_t blocked_ipv4_count;
+static uint8_t blocked_ipv6[MAX_BLOCKED_IPV6][16];
+static size_t blocked_ipv6_count;
 static pthread_mutex_t blocked_ipv4_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct tcp_pcb *tcp;
 static struct udp_pcb *udp;
@@ -94,6 +101,12 @@ compare_ipv4 (const void *left, const void *right)
     return (a > b) - (a < b);
 }
 
+static int
+compare_ipv6 (const void *left, const void *right)
+{
+    return memcmp (left, right, 16);
+}
+
 void
 hev_socks5_tunnel_set_blocked_ipv4 (const uint32_t *addresses, size_t count)
 {
@@ -106,6 +119,23 @@ hev_socks5_tunnel_set_blocked_ipv4 (const uint32_t *addresses, size_t count)
         qsort (blocked_ipv4, count, sizeof (uint32_t), compare_ipv4);
     }
     blocked_ipv4_count = addresses ? count : 0;
+    pthread_mutex_unlock (&blocked_ipv4_mutex);
+}
+
+void
+hev_socks5_tunnel_set_blocked_ipv6 (const uint8_t (*addresses)[16],
+                                    size_t count)
+{
+    if (count > MAX_BLOCKED_IPV6)
+        count = MAX_BLOCKED_IPV6;
+
+    pthread_mutex_lock (&blocked_ipv4_mutex);
+    if (addresses && count) {
+        memcpy (blocked_ipv6, addresses, count * sizeof (blocked_ipv6[0]));
+        qsort (blocked_ipv6, count, sizeof (blocked_ipv6[0]),
+               compare_ipv6);
+    }
+    blocked_ipv6_count = addresses ? count : 0;
     pthread_mutex_unlock (&blocked_ipv4_mutex);
 }
 
@@ -151,12 +181,45 @@ packet_ipv4_is_blocked (const struct pbuf *packet)
 }
 
 static int
+packet_ipv6_is_blocked (const struct pbuf *packet)
+{
+    uint8_t header[40];
+    size_t low, high;
+    int blocked = 0;
+
+    if (packet->tot_len < sizeof (header) ||
+        pbuf_copy_partial (packet, header, sizeof (header), 0) != sizeof (header) ||
+        (header[0] >> 4) != 6)
+        return 0;
+
+    pthread_mutex_lock (&blocked_ipv4_mutex);
+    low = 0;
+    high = blocked_ipv6_count;
+    while (low < high) {
+        const size_t middle = low + ((high - low) / 2);
+        const int comparison = memcmp (blocked_ipv6[middle], header + 24, 16);
+        if (comparison < 0) {
+            low = middle + 1;
+        } else if (comparison > 0) {
+            high = middle;
+        } else {
+            blocked = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock (&blocked_ipv4_mutex);
+
+    return blocked;
+}
+
+static int
 is_ipv4_doh_resolver (const uint8_t *address)
 {
     static const uint8_t resolvers[][4] = {
-        { 1, 1, 1, 1 }, { 1, 0, 0, 1 },
-        { 8, 8, 8, 8 }, { 8, 8, 4, 4 },
-        { 9, 9, 9, 9 },
+        { 1, 1, 1, 1 }, { 1, 0, 0, 1 }, { 8, 8, 8, 8 },
+        { 8, 8, 4, 4 }, { 9, 9, 9, 9 }, { 149, 112, 112, 112 },
+        { 208, 67, 222, 222 }, { 208, 67, 220, 220 },
+        { 94, 140, 14, 14 }, { 94, 140, 15, 15 },
     };
     size_t i;
 
@@ -168,7 +231,39 @@ is_ipv4_doh_resolver (const uint8_t *address)
 }
 
 static int
-packet_is_encrypted_dns (const struct pbuf *packet)
+is_ipv6_doh_resolver (const uint8_t *address)
+{
+    static const uint8_t resolvers[][16] = {
+        { 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0,
+          0, 0, 0, 0, 0, 0, 0x11, 0x11 },
+        { 0x26, 0x06, 0x47, 0x00, 0x47, 0x00, 0, 0,
+          0, 0, 0, 0, 0, 0, 0x10, 0x01 },
+        { 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+          0, 0, 0, 0, 0, 0, 0x88, 0x88 },
+        { 0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0,
+          0, 0, 0, 0, 0, 0, 0x88, 0x44 },
+        { 0x26, 0x20, 0x00, 0xfe, 0, 0, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0xfe },
+        { 0x26, 0x20, 0x00, 0xfe, 0, 0, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0x09 },
+        { 0x26, 0x20, 0x01, 0x19, 0, 0x35, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0x35 },
+        { 0x26, 0x20, 0x01, 0x19, 0, 0x35, 0, 0,
+          0, 0, 0, 0, 0, 0, 0, 0x53 },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof (resolvers) / sizeof (resolvers[0]); i++) {
+        if (memcmp (address, resolvers[i], sizeof (resolvers[i])) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int
+packet_is_encrypted_dns (const struct pbuf *packet, char *destination_address,
+                         size_t address_capacity, uint16_t *port,
+                         const char **transport_protocol)
 {
     uint8_t header[60];
     uint8_t transport[4];
@@ -177,6 +272,8 @@ packet_is_encrypted_dns (const struct pbuf *packet)
     uint16_t destination_port;
     size_t ip_header_length;
     int resolver_match = 0;
+    int address_family;
+    const uint8_t *destination;
 
     if (packet->tot_len < 1 ||
         pbuf_copy_partial (packet, header, 1, 0) != 1)
@@ -196,10 +293,12 @@ packet_is_encrypted_dns (const struct pbuf *packet)
                 ip_header_length)
             return 0;
         protocol = header[9];
-        resolver_match = is_ipv4_doh_resolver (header + 16);
+        destination = header + 16;
+        address_family = AF_INET;
+        resolver_match = is_ipv4_doh_resolver (destination);
         fragment = ((uint16_t)header[6] << 8) | header[7];
         if ((fragment & 0x1FFF) != 0)
-            return resolver_match;
+            return 0;
     } else if (version == 6) {
         size_t offset = 40;
         unsigned int extensions = 0;
@@ -207,6 +306,9 @@ packet_is_encrypted_dns (const struct pbuf *packet)
         if (packet->tot_len < 40 ||
             pbuf_copy_partial (packet, header, 40, 0) != 40)
             return 0;
+        destination = header + 24;
+        address_family = AF_INET6;
+        resolver_match = is_ipv6_doh_resolver (destination);
         protocol = header[6];
         while (protocol == 0 || protocol == 43 || protocol == 44 ||
                protocol == 51 || protocol == 60) {
@@ -246,8 +348,16 @@ packet_is_encrypted_dns (const struct pbuf *packet)
                            ip_header_length) != sizeof (transport))
         return 0;
     destination_port = ((uint16_t)transport[2] << 8) | transport[3];
-    return destination_port == 853 ||
-        (destination_port == 443 && resolver_match);
+    if (protocol != 17 ||
+        (destination_port != 853 &&
+         !(destination_port == 443 && resolver_match)))
+        return 0;
+    if (!inet_ntop (address_family, destination, destination_address,
+                    (socklen_t)address_capacity))
+        return 0;
+    *port = destination_port;
+    *transport_protocol = "UDP";
+    return 1;
 }
 
 static int
@@ -510,14 +620,23 @@ lwip_io_task_entry (void *data)
         if (!buf)
             continue;
 
-        if (packet_ipv4_is_blocked (buf)) {
+        if (packet_ipv4_is_blocked (buf) || packet_ipv6_is_blocked (buf)) {
             pbuf_free (buf);
             continue;
         }
 
-        if (packet_is_encrypted_dns (buf)) {
+        char destination_address[INET6_ADDRSTRLEN];
+        const char *transport_protocol = NULL;
+        uint16_t destination_port = 0;
+
+        if (packet_is_encrypted_dns (buf, destination_address,
+                                     sizeof (destination_address),
+                                     &destination_port,
+                                     &transport_protocol)) {
 #ifdef __ANDROID__
-            hev_jni_report_dns_event ("DoH/DoT Bypass Attempt", 1, 0, 0);
+            hev_jni_report_encrypted_dns_event (destination_address,
+                                                destination_port,
+                                                transport_protocol);
 #endif
             pbuf_free (buf);
             continue;

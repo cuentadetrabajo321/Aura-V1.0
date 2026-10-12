@@ -5,7 +5,21 @@ on:
     branches:
       - main
       - principal
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      build_format:
+        description: Android artifact format
+        type: choice
+        options:
+          - apk
+          - aab
+        default: apk
+      release_tag:
+        description: Optional existing tag to publish as a GitHub Release
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -13,6 +27,11 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      artifact_path: ${{ steps.artifact.outputs.path }}
+      artifact_name: ${{ steps.artifact.outputs.name }}
+      base64_subjects: ${{ steps.subjects.outputs.base64 }}
+      release_tag: ${{ steps.release_tag.outputs.value }}
     steps:
       - name: Clonar repositorio
         uses: actions/checkout@v4
@@ -44,7 +63,7 @@ jobs:
           AURA_KEY_PASSWORD: ${{ secrets.AURA_KEY_PASSWORD }}
           AURA_KEYSTORE_BASE64: ${{ secrets.AURA_KEYSTORE_BASE64 }}
           AURA_PUBLIC_KEY_ENV: ${{ secrets.AURA_PUBLIC_KEY_ENV }}
-          AURA_BUILD_FORMAT: apk
+          AURA_BUILD_FORMAT: ${{ github.event.inputs.build_format || 'apk' }}
         run: bash tool/compile_aura.sh
 
       - name: Verificar Firma del Artefacto
@@ -54,12 +73,106 @@ jobs:
           AURA_KEY_PASSWORD: ${{ secrets.AURA_KEY_PASSWORD }}
           AURA_KEYSTORE_BASE64: ${{ secrets.AURA_KEYSTORE_BASE64 }}
           AURA_PUBLIC_KEY_ENV: ${{ secrets.AURA_PUBLIC_KEY_ENV }}
-          AURA_BUILD_FORMAT: apk
+          AURA_BUILD_FORMAT: ${{ github.event.inputs.build_format || 'apk' }}
         run: bash tool/compile_aura.sh --verify-artifact
 
-      - name: Cargar APK como Artefacto de GitHub
+      - name: Set release artifact metadata
+        id: artifact
+        shell: bash
+        env:
+          BUILD_FORMAT: ${{ github.event.inputs.build_format || 'apk' }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_FORMAT" == "aab" ]]; then
+            artifact_path='build/app/outputs/bundle/release/app-release.aab'
+            artifact_name='Aura-Mobile-Defens-AAB'
+          else
+            artifact_path='build/app/outputs/flutter-apk/app-release.apk'
+            artifact_name='Aura-Mobile-Defens-APK'
+          fi
+          [[ -s "$artifact_path" ]] || {
+            printf 'Expected signed artifact missing or empty: %s\n' "$artifact_path" >&2
+            exit 1
+          }
+          printf 'path=%s\n' "$artifact_path" >> "$GITHUB_OUTPUT"
+          printf 'name=%s\n' "$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare SLSA subject digest
+        id: subjects
+        shell: bash
+        env:
+          ARTIFACT_PATH: ${{ steps.artifact.outputs.path }}
+        run: |
+          set -euo pipefail
+          subjects="$(sha256sum "$ARTIFACT_PATH" | base64 -w0)"
+          printf 'base64=%s\n' "$subjects" >> "$GITHUB_OUTPUT"
+
+      - name: Set release tag
+        id: release_tag
+        shell: bash
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="$DISPATCH_TAG"
+          fi
+          printf 'value=%s\n' "$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Aura-Mobile-Defens-APK
-          path: build/app/outputs/flutter-apk/app-release.apk
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
+
+  slsa-provenance:
+    needs: build
+    permissions:
+      contents: write
+      id-token: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v1.2.2
+    with:
+      base64-subjects: ${{ needs.build.outputs.base64_subjects }}
+      provenance-name: aura-release.intoto.jsonl
+      upload-assets: ${{ needs.build.outputs.release_tag != '' }}
+
+  attach-release-assets:
+    needs:
+      - build
+      - slsa-provenance
+    if: needs.build.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Download signed Android artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: release-assets
+
+      - name: Download signed SLSA provenance
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.slsa-provenance.outputs.provenance-name }}
+          path: release-assets
+
+      - name: Upload release bundle with provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aura-Mobile-Defens-Release-with-provenance
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Attach APK/AAB and provenance to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

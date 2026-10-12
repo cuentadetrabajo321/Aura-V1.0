@@ -51,6 +51,8 @@ static int thread_joinable;
 static JavaVM *java_vm;
 static jclass tproxy_class;
 static jmethodID dns_event_method;
+static jmethodID sni_event_method;
+static jmethodID encrypted_dns_event_method;
 static jmethodID protect_socket_method;
 static pthread_t work_thread;
 static pthread_mutex_t mutex;
@@ -110,12 +112,19 @@ JNI_OnLoad (JavaVM *vm, void *reserved)
     dns_event_method = (*env)->GetStaticMethodID (
         env, klass, "dispatchDnsEvent",
         "(Ljava/lang/String;ILjava/lang/String;I)V");
+    sni_event_method = (*env)->GetStaticMethodID (
+        env, klass, "dispatchSniEvent",
+        "(Ljava/lang/String;Ljava/lang/String;I)V");
+    encrypted_dns_event_method = (*env)->GetStaticMethodID (
+        env, klass, "dispatchEncryptedDnsEvent",
+        "(Ljava/lang/String;ILjava/lang/String;)V");
     protect_socket_method = (*env)->GetStaticMethodID (
         env, klass, "protectSocket", "(I)Z");
     res = (*env)->RegisterNatives (env, klass, native_methods,
                                    N_ELEMENTS (native_methods));
     (*env)->DeleteLocalRef (env, klass);
-    if (res < 0 || !tproxy_class || !dns_event_method || !protect_socket_method)
+    if (res < 0 || !tproxy_class || !dns_event_method || !sni_event_method ||
+        !encrypted_dns_event_method || !protect_socket_method)
         return JNI_ERR;
 
     pthread_key_create (&current_jni_env, detach_current_thread);
@@ -194,6 +203,87 @@ hev_jni_report_dns_event (const char *domain, int action,
         (*env)->DeleteLocalRef (env, java_domain);
     if (java_source_address)
         (*env)->DeleteLocalRef (env, java_source_address);
+    if (attached)
+        (*java_vm)->DetachCurrentThread (java_vm);
+}
+
+void
+hev_jni_report_sni_event (const char *domain,
+                          const char *destination_address,
+                          uint16_t destination_port)
+{
+    JNIEnv *env = NULL;
+    jstring java_domain;
+    jstring java_destination;
+    int attached = 0;
+    jint status;
+
+    if (!java_vm || !tproxy_class || !sni_event_method ||
+        !domain || !destination_address)
+        return;
+    status = (*java_vm)->GetEnv (java_vm, (void **)&env, JNI_VERSION_1_4);
+    if (status == JNI_EDETACHED) {
+        if ((*java_vm)->AttachCurrentThread (java_vm, (void **)&env, NULL) != JNI_OK)
+            return;
+        attached = 1;
+    } else if (status != JNI_OK) {
+        return;
+    }
+
+    java_domain = (*env)->NewStringUTF (env, domain);
+    java_destination = (*env)->NewStringUTF (env, destination_address);
+    if (java_domain && java_destination) {
+        (*env)->CallStaticVoidMethod (env, tproxy_class, sni_event_method,
+                                     java_domain, java_destination,
+                                     (jint)destination_port);
+        if ((*env)->ExceptionCheck (env))
+            (*env)->ExceptionClear (env);
+    }
+    if (java_domain)
+        (*env)->DeleteLocalRef (env, java_domain);
+    if (java_destination)
+        (*env)->DeleteLocalRef (env, java_destination);
+    if (attached)
+        (*java_vm)->DetachCurrentThread (java_vm);
+}
+
+void
+hev_jni_report_encrypted_dns_event (const char *destination_address,
+                                   uint16_t destination_port,
+                                   const char *transport_protocol)
+{
+    JNIEnv *env = NULL;
+    jstring java_destination;
+    jstring java_protocol;
+    int attached = 0;
+    jint status;
+
+    if (!java_vm || !tproxy_class || !encrypted_dns_event_method ||
+        !destination_address || !transport_protocol)
+        return;
+    status = (*java_vm)->GetEnv (java_vm, (void **)&env, JNI_VERSION_1_4);
+    if (status == JNI_EDETACHED) {
+        if ((*java_vm)->AttachCurrentThread (java_vm, (void **)&env, NULL) != JNI_OK)
+            return;
+        attached = 1;
+    } else if (status != JNI_OK) {
+        return;
+    }
+
+    java_destination = (*env)->NewStringUTF (env, destination_address);
+    java_protocol = (*env)->NewStringUTF (env, transport_protocol);
+    if (java_destination && java_protocol) {
+        (*env)->CallStaticVoidMethod (env, tproxy_class,
+                                     encrypted_dns_event_method,
+                                     java_destination, (jint)destination_port,
+                                     java_protocol);
+        if ((*env)->ExceptionCheck (env))
+            (*env)->ExceptionClear (env);
+    }
+    if (java_destination)
+        (*env)->DeleteLocalRef (env, java_destination);
+    if (java_protocol)
+        (*env)->DeleteLocalRef (env, java_protocol);
     if (attached)
         (*java_vm)->DetachCurrentThread (java_vm);
 }
@@ -316,31 +406,43 @@ native_set_blocked_ips (JNIEnv *env, jobject thiz, jobjectArray addresses)
 {
     const jsize input_count = (*env)->GetArrayLength (env, addresses);
     const size_t capacity = input_count > 8192 ? 8192 : (size_t)input_count;
-    uint32_t *parsed = calloc (capacity, sizeof (uint32_t));
-    size_t count = 0;
+    uint32_t *parsed_ipv4 = calloc (capacity, sizeof (uint32_t));
+    uint8_t (*parsed_ipv6)[16] = calloc (capacity, sizeof (*parsed_ipv6));
+    size_t count_ipv4 = 0;
+    size_t count_ipv6 = 0;
     jsize i;
 
-    if (!parsed && capacity)
+    if ((!parsed_ipv4 || !parsed_ipv6) && capacity) {
+        free (parsed_ipv4);
+        free (parsed_ipv6);
         return;
+    }
 
     for (i = 0; i < input_count && count < capacity; i++) {
         jstring value = (jstring)(*env)->GetObjectArrayElement (env, addresses, i);
         const char *text;
-        struct in_addr address;
+        struct in_addr address_ipv4;
+        struct in6_addr address_ipv6;
 
         if (!value)
             continue;
         text = (*env)->GetStringUTFChars (env, value, NULL);
         if (text) {
-            if (inet_pton (AF_INET, text, &address) == 1)
-                parsed[count++] = address.s_addr;
+            if (inet_pton (AF_INET, text, &address_ipv4) == 1) {
+                parsed_ipv4[count_ipv4++] = address_ipv4.s_addr;
+            } else if (inet_pton (AF_INET6, text, &address_ipv6) == 1) {
+                memcpy (parsed_ipv6[count_ipv6++], &address_ipv6, 16);
+            }
             (*env)->ReleaseStringUTFChars (env, value, text);
         }
         (*env)->DeleteLocalRef (env, value);
     }
 
-    hev_socks5_tunnel_set_blocked_ipv4 (parsed, count);
-    free (parsed);
+    hev_socks5_tunnel_set_blocked_ipv4 (parsed_ipv4, count_ipv4);
+    hev_socks5_tunnel_set_blocked_ipv6 (
+        (const uint8_t (*)[16])parsed_ipv6, count_ipv6);
+    free (parsed_ipv4);
+    free (parsed_ipv6);
 }
 
 static jboolean

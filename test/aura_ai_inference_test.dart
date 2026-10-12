@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:aura_mobile_defens/inference/aura_ai_inference.dart';
+import 'package:aura_mobile_defens/inference/aura_common_domains.dart';
 import 'package:aura_mobile_defens/models/aura_ai_brain.dart' as model_inference;
 import 'package:test/test.dart';
 
@@ -59,22 +60,139 @@ void main() {
       expect(results.single.host, 'good.example');
     });
 
+    test('accepts IPv6 literals as addresses but does not score them as domains',
+        () async {
+      final results = await model_inference.AuraAIInference.analyzeThreatPayload(
+        rawData: '{"hosts":[{"host":"https://[2001:0db8::1]/"}]}',
+        modelStructure: _safeForest(),
+        suspiciousTlds: <String>[],
+      );
+
+      expect(results, isEmpty);
+    });
+
   });
 
   group('AuraAIInference feature calculations', () {
-    test('computes all six features from the normalized host', () {
+    test('preserves the six legacy feature values and exposes the full vector', () {
       final features = AuraAIInference.extractFeatures('ABBB3.XYZ');
+      final enhanced =
+          AuraAIInference.extractEnhancedFeatures('ABBB3.XYZ');
       const length = 9;
       final expectedEntropy =
           -((3 / length) * (math.log(3 / length) / math.ln2) +
               6 * (1 / length) * (math.log(1 / length) / math.ln2));
 
+      expect(enhanced, hasLength(18));
+      expect(AuraAIInference.enhancedFeatureOrder, <String>[
+        'length',
+        'shannon_entropy',
+        'digit_ratio',
+        'vowel_ratio',
+        'consonant_sequence_ratio',
+        'suspicious_tld',
+        'min_normalized_levenshtein',
+        'bigram_repeat_ratio',
+        'trigram_repeat_ratio',
+        'subdomain_depth',
+        'tld_length_ratio',
+        'idn_homograph_indicator',
+        'non_ascii_ratio',
+        'consecutive_digits_indicator',
+        'conditional_entropy',
+        'rare_character_ratio',
+        'longest_label_length_ratio',
+        'suspicious_keyword_indicator',
+      ]);
       expect(features['length'], 9);
       expect(features['shannon_entropy'], closeTo(expectedEntropy, 1e-12));
       expect(features['digit_ratio'], closeTo(1 / 9, 1e-12));
       expect(features['vowel_ratio'], closeTo(1 / 7, 1e-12));
       expect(features['consonant_sequence_ratio'], closeTo(6 / 7, 1e-12));
       expect(features['suspicious_tld'], 1);
+      expect(enhanced.take(6).toList(), <double>[
+        9,
+        expectedEntropy,
+        1 / 9,
+        1 / 7,
+        6 / 7,
+        1,
+      ]);
+      expect(enhanced.skip(6).every((value) => value >= 0 && value <= 1), isTrue);
+      expect(enhanced[13], 0);
+      expect(enhanced[15], closeTo(2 / 7, 1e-12));
+    });
+
+    test('detects IDN homographs and suspicious keyword patterns', () {
+      final features =
+          AuraAIInference.extractEnhancedFeatures('раypal-free123.com');
+
+      expect(features, hasLength(18));
+      expect(features[11], 1);
+      expect(features[12], greaterThan(0));
+      expect(features[13], 1);
+      expect(features[17], 1);
+    });
+
+    test('decodes punycode without flagging every IDN', () {
+      expect(
+        AuraAIInference.extractEnhancedFeatures('xn--80ak6aa92e.com')[11],
+        1,
+      );
+      expect(
+        AuraAIInference.extractEnhancedFeatures('xn--fsqu00a.com')[11],
+        0,
+      );
+    });
+
+    test('scores mapped Cyrillic homoglyphs and flags two or more', () {
+      expect(AuraAIInference.detectIdnHomoglyphs('apple.com'), 0);
+      expect(AuraAIInference.detectIdnHomoglyphs('\u0430pple.com'), 0.5);
+      expect(
+        AuraAIInference.detectIdnHomoglyphs('\u0430\u0440ple.com'),
+        1,
+      );
+      expect(
+        AuraAIInference.detectIdnHomoglyphs('xn--pypal-4ve.com'),
+        0.5,
+      );
+      expect(
+        AuraAIInference.detectIdnHomoglyphs('xn--80ak6aa92e.com'),
+        1,
+      );
+      expect(AuraAIInference.detectIdnHomoglyphs(''), 0);
+    });
+
+    test('uses the pinned 1000-domain corpus shared with Python training', () {
+      final source = File(
+        'tool/domain_lists/tranco_top_1000_20261012.txt',
+      ).readAsLinesSync();
+
+      expect(auraCommonDomains, hasLength(1000));
+      expect(auraCommonDomains, source);
+      expect(
+        AuraAIInference.extractEnhancedFeatures('google.com')[6],
+        0,
+      );
+      expect(
+        AuraAIInference.levenshteinDistanceToTopDomains('goggle.com'),
+        closeTo(0.1, 1e-12),
+      );
+      expect(
+        AuraAIInference.levenshteinDistanceToTopDomains(
+          'totally-unrelated-domain.example',
+        ),
+        inInclusiveRange(0, 1),
+      );
+      expect(AuraAIInference.isProbableTyposquatting('google.com'), isFalse);
+      expect(AuraAIInference.isProbableTyposquatting('goggle.com'), isTrue);
+      expect(
+        AuraAIInference.isProbableTyposquatting(
+          'totally-unrelated-domain.example',
+        ),
+        isFalse,
+      );
+      expect(AuraAIInference.levenshteinDistanceToTopDomains(''), 1);
     });
 
     test('does not treat a suspicious-looking substring as the TLD', () {

@@ -9,14 +9,6 @@
 #define AURA_MAX_TLS_RECORD_LENGTH 18432
 #define AURA_MAX_CLIENT_HELLO_LENGTH 65535
 
-static const char *const doh_resolvers[] = {
-    "cloudflare-dns.com",
-    "dns.google",
-    "dns.quad9.net",
-    "opendns.com",
-    "doh.cleanbrowsing.org",
-};
-
 static char dynamic_sni_rules[AURA_MAX_DYNAMIC_SNI_RULES]
                              [AURA_MAX_DOMAIN_LENGTH + 1];
 static size_t dynamic_sni_rules_count;
@@ -139,12 +131,6 @@ domain_is_blocked (const char *domain)
         if (domain_matches_rule (domain, dynamic_sni_allowlist[i])) {
             pthread_mutex_unlock (&dynamic_sni_rules_mutex);
             return 0;
-        }
-    }
-    for (i = 0; i < sizeof (doh_resolvers) / sizeof (doh_resolvers[0]); i++) {
-        if (domain_matches_rule (domain, doh_resolvers[i])) {
-            pthread_mutex_unlock (&dynamic_sni_rules_mutex);
-            return 1;
         }
     }
     for (i = 0; i < dynamic_sni_rules_count; i++) {

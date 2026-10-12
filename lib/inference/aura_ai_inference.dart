@@ -2,7 +2,30 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'aura_common_domains.dart';
+
 class AuraAIInference {
+  static const List<String> enhancedFeatureOrder = <String>[
+    'length',
+    'shannon_entropy',
+    'digit_ratio',
+    'vowel_ratio',
+    'consonant_sequence_ratio',
+    'suspicious_tld',
+    'min_normalized_levenshtein',
+    'bigram_repeat_ratio',
+    'trigram_repeat_ratio',
+    'subdomain_depth',
+    'tld_length_ratio',
+    'idn_homograph_indicator',
+    'non_ascii_ratio',
+    'consecutive_digits_indicator',
+    'conditional_entropy',
+    'rare_character_ratio',
+    'longest_label_length_ratio',
+    'suspicious_keyword_indicator',
+  ];
+
   static const List<String> auraStaticWhitelist = <String>[
     'google.com',
     'apple.com',
@@ -27,7 +50,6 @@ class AuraAIInference {
   ];
 
   static const List<String> suspiciousTlds = <String>[
-    'biz',
     'xyz',
     'info',
     'cc',
@@ -61,6 +83,8 @@ class AuraAIInference {
   static const int _binaryTreeHeaderLength = 8;
   static const int _binaryNodeLength = 20;
   static const int _maximumBinaryModelBytes = 5 * 1024 * 1024;
+  static final Map<String, (int, double)> _levenshteinCache =
+      <String, (int, double)>{};
 
   /// Returns true for allowlisted hosts or hosts classified as safe by the model.
   static bool analyzeHostSecure(
@@ -72,50 +96,431 @@ class AuraAIInference {
     if (_isAllowlisted(host)) return true;
 
     Uint8List? hostBuffer;
-    Uint8List? frequencies;
     Float64List? features;
     try {
       hostBuffer = Uint8List.fromList(host.codeUnits);
-      frequencies = Uint8List(128);
-      features = Float64List(6);
-      _extractFeatureVector(hostBuffer, frequencies, features);
+      features = Float64List(enhancedFeatureOrder.length);
+      _extractFeatureVector(hostBuffer, features);
       return _evaluateEnsemble(features, trainedModelJson);
     } finally {
       hostBuffer?.fillRange(0, hostBuffer.length, 0);
-      frequencies?.fillRange(0, frequencies.length, 0);
       features?.fillRange(0, features.length, 0);
     }
   }
 
-  /// Exposes the model's six feature values for diagnostics and verification.
+  /// Retains the original six named values for existing diagnostics callers.
   static Map<String, double> extractFeatures(String rawHost) {
-    final host = _normalizeHost(rawHost);
+    final values = extractEnhancedFeatures(rawHost);
+    return <String, double>{
+      'length': values[0],
+      'shannon_entropy': values[1],
+      'digit_ratio': values[2],
+      'vowel_ratio': values[3],
+      'consonant_sequence_ratio': values[4],
+      'suspicious_tld': values[5],
+    };
+  }
+
+  /// Returns the six legacy features followed by twelve normalized features.
+  static List<double> extractEnhancedFeatures(String domain) {
+    final host = _normalizeFeatureDomain(domain);
     if (host == null) {
       throw const FormatException('El host no tiene un formato válido.');
     }
 
-    Uint8List? hostBuffer;
-    Uint8List? frequencies;
-    Float64List? values;
-    try {
-      hostBuffer = Uint8List.fromList(host.codeUnits);
-      frequencies = Uint8List(128);
-      values = Float64List(6);
-      _extractFeatureVector(hostBuffer, frequencies, values);
-      return <String, double>{
-        'length': values[0],
-        'shannon_entropy': values[1],
-        'digit_ratio': values[2],
-        'vowel_ratio': values[3],
-        'consonant_sequence_ratio': values[4],
-        'suspicious_tld': values[5],
-      };
-    } finally {
-      hostBuffer?.fillRange(0, hostBuffer.length, 0);
-      frequencies?.fillRange(0, frequencies.length, 0);
-      values?.fillRange(0, values.length, 0);
+    return _calculateEnhancedFeatures(host);
+  }
+
+  static List<double> _calculateEnhancedFeatures(String host) {
+    final characters = host.runes.toList(growable: false);
+    if (characters.isEmpty) {
+      return List<double>.filled(enhancedFeatureOrder.length, 0);
+    }
+
+    var digits = 0;
+    var vowels = 0;
+    var letters = 0;
+    var consonantRun = 0;
+    var consonantSequenceCharacters = 0;
+    final asciiLetters = <int>[];
+    final labels = host.split('.');
+    for (final character in characters) {
+      if (_isAsciiDigit(character)) digits++;
+      if (!_isAsciiLetter(character)) {
+        if (consonantRun >= 3) {
+          consonantSequenceCharacters += consonantRun;
+        }
+        consonantRun = 0;
+        continue;
+      }
+
+      letters++;
+      asciiLetters.add(character);
+      final lower = character | 0x20;
+      if (lower == 0x61 ||
+          lower == 0x65 ||
+          lower == 0x69 ||
+          lower == 0x6f ||
+          lower == 0x75) {
+        vowels++;
+        if (consonantRun >= 3) {
+          consonantSequenceCharacters += consonantRun;
+        }
+        consonantRun = 0;
+      } else {
+        consonantRun++;
+      }
+    }
+    if (consonantRun >= 3) {
+      consonantSequenceCharacters += consonantRun;
+    }
+
+    final frequencies = <int, int>{};
+    for (final character in characters) {
+      frequencies.update(character, (count) => count + 1, ifAbsent: () => 1);
+    }
+    var entropy = 0.0;
+    for (final count in frequencies.values) {
+      final probability = count / characters.length;
+      entropy -= probability * (math.log(probability) / math.ln2);
+    }
+
+    final tld = labels.last;
+    final bigramRatio = _repeatedNgramRatio(characters, 2);
+    final trigramRatio = _repeatedNgramRatio(characters, 3);
+    final nonAsciiCount = characters.where((character) => character > 0x7f).length;
+    final rareCharacterCount = asciiLetters.where((character) {
+      final lower = character | 0x20;
+      return lower == 0x71 ||
+          lower == 0x78 ||
+          lower == 0x7a ||
+          lower == 0x6b;
+    }).length;
+    final idnHomograph = detectIdnHomoglyphs(host) >= 1.0;
+    var longestLabelLength = 0;
+    for (final label in labels) {
+      longestLabelLength =
+          math.max(longestLabelLength, label.runes.length).toInt();
+    }
+
+    return <double>[
+      characters.length.toDouble(),
+      entropy,
+      digits / characters.length,
+      letters == 0 ? 0 : vowels / letters,
+      letters == 0 ? 0 : consonantSequenceCharacters / letters,
+      suspiciousTlds.contains(tld) ? 1 : 0,
+      _minimumNormalizedLevenshtein(host),
+      bigramRatio,
+      trigramRatio,
+      (host.split('.').length - 1).clamp(0, 126) / 126,
+      tld.runes.length.clamp(0, 63) / 63,
+      idnHomograph ? 1 : 0,
+      nonAsciiCount / characters.length,
+      RegExp(r'[0-9]{2,}').hasMatch(host) ? 1 : 0,
+      _conditionalLabelEntropy(labels),
+      asciiLetters.isEmpty ? 0 : rareCharacterCount / asciiLetters.length,
+      longestLabelLength.clamp(0, 63) / 63,
+      const <String>['free', 'reward', 'update', 'system']
+              .any(host.contains)
+          ? 1
+          : 0,
+    ];
+  }
+
+  static const Map<int, String> idnConfusables = <int, String>{
+    0x0430: 'a',
+    0x0435: 'e',
+    0x043e: 'o',
+    0x0440: 'p',
+    0x0441: 'c',
+    0x0443: 'y',
+    0x0445: 'x',
+  };
+
+  /// Scores mapped Cyrillic homoglyphs: one yields 0.5, two or more yield 1.
+  static double detectIdnHomoglyphs(String domain) {
+    final candidate = _normalizeFeatureDomain(domain);
+    if (candidate == null) return 0;
+
+    var confusableCount = 0;
+    for (var label in candidate.split('.')) {
+      if (label.startsWith('xn--')) {
+        final decoded = _decodePunycode(label.substring(4));
+        if (decoded == null) continue;
+        label = decoded;
+      }
+      confusableCount +=
+          label.runes.where(idnConfusables.containsKey).length;
+    }
+    return math.min(confusableCount / 2, 1.0);
+  }
+
+  static String? _decodePunycode(String encoded) {
+    const base = 36;
+    const tmin = 1;
+    const tmax = 26;
+    const initialBias = 72;
+    const initialCodePoint = 128;
+
+    final output = <int>[];
+    var inputIndex = 0;
+    final delimiter = encoded.lastIndexOf('-');
+    if (delimiter >= 0) {
+      for (var index = 0; index < delimiter; index++) {
+        final character = encoded.codeUnitAt(index);
+        if (character > 0x7f) return null;
+        output.add(character);
+      }
+      inputIndex = delimiter + 1;
+    }
+
+    var bias = initialBias;
+    var codePoint = initialCodePoint;
+    var insertionIndex = 0;
+    while (inputIndex < encoded.length) {
+      final oldInsertionIndex = insertionIndex;
+      var weight = 1;
+      for (var k = base;; k += base) {
+        if (inputIndex >= encoded.length) return null;
+        final digit = _punycodeDigit(encoded.codeUnitAt(inputIndex++));
+        if (digit == null) return null;
+        insertionIndex += digit * weight;
+
+        final threshold = k <= bias
+            ? tmin
+            : k >= bias + tmax
+                ? tmax
+                : k - bias;
+        if (digit < threshold) break;
+        weight *= base - threshold;
+      }
+
+      final outputLength = output.length + 1;
+      bias = _adaptPunycodeBias(
+        insertionIndex - oldInsertionIndex,
+        outputLength,
+        oldInsertionIndex == 0,
+      );
+      codePoint += insertionIndex ~/ outputLength;
+      insertionIndex %= outputLength;
+      if (codePoint > 0x10ffff ||
+          (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return null;
+      }
+      output.insert(insertionIndex, codePoint);
+      insertionIndex++;
+    }
+    return String.fromCharCodes(output);
+  }
+
+  static int? _punycodeDigit(int character) {
+    if (character >= 0x61 && character <= 0x7a) return character - 0x61;
+    if (character >= 0x30 && character <= 0x39) return character - 0x30 + 26;
+    return null;
+  }
+
+  static int _adaptPunycodeBias(int delta, int pointCount, bool firstTime) {
+    const base = 36;
+    const tmin = 1;
+    const tmax = 26;
+    const skew = 38;
+    const damp = 700;
+
+    delta = firstTime ? delta ~/ damp : delta ~/ 2;
+    delta += delta ~/ pointCount;
+    var k = 0;
+    while (delta > ((base - tmin) * tmax) ~/ 2) {
+      delta ~/= base - tmin;
+      k += base;
+    }
+    return k + ((base - tmin + 1) * delta) ~/ (delta + skew);
+  }
+
+  static double _repeatedNgramRatio(List<int> characters, int size) {
+    final gramCount = characters.length - size + 1;
+    if (gramCount <= 0) return 0;
+    final frequencies = <String, int>{};
+    for (var index = 0; index < gramCount; index++) {
+      final gram = characters
+          .sublist(index, index + size)
+          .map((character) => character.toRadixString(16))
+          .join(',');
+      frequencies.update(gram, (count) => count + 1, ifAbsent: () => 1);
+    }
+    final repeated = frequencies.values.fold<int>(
+      0,
+      (total, count) => total + count - 1,
+    );
+    return repeated / gramCount;
+  }
+
+  static double _conditionalLabelEntropy(List<String> labels) {
+    var characterCount = 0;
+    var weightedEntropy = 0.0;
+    for (final label in labels) {
+      final labelCharacters = label.runes.toList(growable: false);
+      if (labelCharacters.isEmpty) continue;
+      characterCount += labelCharacters.length;
+      final frequencies = <int, int>{};
+      for (final character in labelCharacters) {
+        frequencies.update(
+          character,
+          (count) => count + 1,
+          ifAbsent: () => 1,
+        );
+      }
+      var entropy = 0.0;
+      for (final count in frequencies.values) {
+        final probability = count / labelCharacters.length;
+        entropy -= probability * (math.log(probability) / math.ln2);
+      }
+      if (labelCharacters.length > 1) {
+        weightedEntropy += labelCharacters.length *
+            entropy /
+            (math.log(labelCharacters.length) / math.ln2);
+      }
+    }
+    return characterCount == 0 ? 0 : weightedEntropy / characterCount;
+  }
+
+  /// Return minimum edit distance / longer domain length, in [0, 1].
+  static double levenshteinDistanceToTopDomains(String domain) {
+    final host = _normalizeFeatureDomain(domain);
+    if (host == null) return 1;
+    return _minimumTopDomainDistances(host).$2;
+  }
+
+  /// True when the closest popular domain is no more than two edits away.
+  static bool isProbableTyposquatting(String domain) {
+    final host = _normalizeFeatureDomain(domain);
+    if (host == null) return false;
+    final distance = _minimumTopDomainDistances(host).$1;
+    return distance > 0 && distance <= 2;
+  }
+
+  static double _minimumNormalizedLevenshtein(String host) =>
+      _minimumTopDomainDistances(host).$2;
+
+  static (int, double) _minimumTopDomainDistances(String host) {
+    final cached = _levenshteinCache[host];
+    if (cached != null) return cached;
+
+    final hostCharacters = host.runes.toList(growable: false);
+    var minimumDistance = math.max(hostCharacters.length, 253).toInt();
+    var minimumNormalized = 1.0;
+    for (final commonDomain in auraCommonDomains) {
+      final domainCharacters = commonDomain.runes.toList(growable: false);
+      final denominator =
+          math.max(hostCharacters.length, domainCharacters.length).toInt();
+      if (denominator == 0) continue;
+      final lengthDifference =
+          (hostCharacters.length - domainCharacters.length).abs();
+      if (lengthDifference >= minimumDistance &&
+          lengthDifference / denominator >= minimumNormalized) {
+        continue;
+      }
+      final distance = _levenshteinDistance(hostCharacters, domainCharacters);
+      final normalized = distance / denominator;
+      if (normalized < minimumNormalized) {
+        minimumNormalized = normalized;
+      }
+      if (distance < minimumDistance) {
+        minimumDistance = distance;
+      }
+      if (minimumNormalized == 0 && minimumDistance == 0) {
+        break;
+      }
+    }
+    if (_levenshteinCache.length >= 512) {
+      _levenshteinCache.remove(_levenshteinCache.keys.first);
+    }
+    final distances = (minimumDistance, minimumNormalized);
+    _levenshteinCache[host] = distances;
+    return distances;
+  }
+
+  static int _levenshteinDistance(List<int> left, List<int> right) {
+    if (left.isEmpty) return right.length;
+    if (right.isEmpty) return left.length;
+    var previous = List<int>.generate(right.length + 1, (index) => index);
+    var current = List<int>.filled(right.length + 1, 0);
+    for (var leftIndex = 0; leftIndex < left.length; leftIndex++) {
+      current[0] = leftIndex + 1;
+      var rowMinimum = current[0];
+      for (var rightIndex = 0; rightIndex < right.length; rightIndex++) {
+        final substitutionCost =
+            left[leftIndex] == right[rightIndex] ? 0 : 1;
+        current[rightIndex + 1] = math
+            .min(
+              math.min(
+                current[rightIndex] + 1,
+                previous[rightIndex + 1] + 1,
+              ),
+              previous[rightIndex] + substitutionCost,
+            )
+            .toInt();
+        rowMinimum = math.min(rowMinimum, current[rightIndex + 1]).toInt();
+      }
+      final previousRow = previous;
+      previous = current;
+      current = previousRow;
+      if (rowMinimum >= left.length && rowMinimum >= right.length) {
+        return rowMinimum;
+      }
+    }
+    return previous.last;
+  }
+
+  static String? _normalizeFeatureDomain(String rawDomain) {
+    final asciiHost = _normalizeHost(rawDomain);
+    if (asciiHost != null) return asciiHost;
+
+    var candidate = rawDomain.trim().toLowerCase();
+    if (candidate.endsWith('.')) {
+      candidate = candidate.substring(0, candidate.length - 1);
+    }
+    if (candidate.isEmpty || !candidate.contains('.') ||
+        candidate.runes.length > 253 ||
+        InternetAddress.tryParse(candidate) != null) {
+      return null;
+    }
+
+    final labels = candidate.split('.');
+    for (final label in labels) {
+      final characters = label.runes.toList(growable: false);
+      if (characters.isEmpty ||
+          characters.length > 63 ||
+          characters.first == 0x2d ||
+          characters.last == 0x2d) {
+        return null;
+      }
+      for (final character in characters) {
+        final isAsciiDnsCharacter = _isAsciiLetter(character) ||
+            _isAsciiDigit(character) ||
+            character == 0x2d;
+        final isSupportedIdnCharacter = character > 0x7f &&
+            String.fromCharCode(character).trim().isNotEmpty;
+        if (!isAsciiDnsCharacter && !isSupportedIdnCharacter) return null;
+      }
+    }
+    return candidate;
+  }
+
+  /// Populates the legacy fields first, then appends the synchronized features.
+  static void _extractFeatureVector(Uint8List host, Float64List features) {
+    final values = _calculateEnhancedFeatures(String.fromCharCodes(host));
+    for (var index = 0; index < values.length; index++) {
+      features[index] = values[index];
     }
   }
+
+  static bool _isAsciiLetter(int character) =>
+      (character >= 0x41 && character <= 0x5a) ||
+      (character >= 0x61 && character <= 0x7a);
+
+  static bool _isAsciiDigit(int character) =>
+      character >= 0x30 && character <= 0x39;
 
   /// Evaluates a little-endian AURA forest.
   ///
@@ -129,7 +534,6 @@ class AuraAIInference {
     if (_isAllowlisted(host)) return true;
 
     Uint8List? hostBuffer;
-    Uint8List? frequencies;
     Float64List? features;
     try {
       if (modelBytes.length < _binaryHeaderLength ||
@@ -154,9 +558,8 @@ class AuraAIInference {
       }
 
       hostBuffer = Uint8List.fromList(host.codeUnits);
-      frequencies = Uint8List(128);
-      features = Float64List(6);
-      _extractFeatureVector(hostBuffer, frequencies, features);
+      features = Float64List(enhancedFeatureOrder.length);
+      _extractFeatureVector(hostBuffer, features);
 
       var offset = _binaryHeaderLength;
       var threatVotes = 0;
@@ -196,7 +599,6 @@ class AuraAIInference {
       return threatVotes * 2 < treeCount;
     } finally {
       hostBuffer?.fillRange(0, hostBuffer.length, 0);
-      frequencies?.fillRange(0, frequencies.length, 0);
       features?.fillRange(0, features.length, 0);
     }
   }
@@ -336,89 +738,6 @@ class AuraAIInference {
   static bool _isAllowlisted(String host) => auraStaticWhitelist.any(
         (suffix) => host == suffix || host.endsWith('.$suffix'),
       );
-
-  static void _extractFeatureVector(
-    Uint8List host,
-    Uint8List frequencies,
-    Float64List features,
-  ) {
-    final length = host.length;
-    if (length == 0) return;
-
-    var digits = 0;
-    var vowels = 0;
-    var letters = 0;
-    var consonantRun = 0;
-    var consonantSequenceCharacters = 0;
-    var lastDot = -1;
-
-    for (var index = 0; index < length; index++) {
-      final character = host[index];
-      frequencies[character]++;
-      if (character == 0x2e) lastDot = index;
-      if (character >= 0x30 && character <= 0x39) digits++;
-
-      final lower = character | 0x20;
-      final isLetter = (character >= 0x41 && character <= 0x5a) ||
-          (character >= 0x61 && character <= 0x7a);
-      if (!isLetter) {
-        if (consonantRun >= 3) {
-          consonantSequenceCharacters += consonantRun;
-        }
-        consonantRun = 0;
-        continue;
-      }
-
-      letters++;
-      if (lower == 0x61 ||
-          lower == 0x65 ||
-          lower == 0x69 ||
-          lower == 0x6f ||
-          lower == 0x75) {
-        vowels++;
-        if (consonantRun >= 3) {
-          consonantSequenceCharacters += consonantRun;
-        }
-        consonantRun = 0;
-      } else {
-        consonantRun++;
-      }
-    }
-    if (consonantRun >= 3) {
-      consonantSequenceCharacters += consonantRun;
-    }
-
-    var entropy = 0.0;
-    for (final count in frequencies) {
-      if (count == 0) continue;
-      final probability = count / length;
-      entropy -= probability * (math.log(probability) / math.ln2);
-    }
-
-    features[0] = length.toDouble();
-    features[1] = entropy;
-    features[2] = digits / length;
-    features[3] = letters == 0 ? 0 : vowels / letters;
-    features[4] = letters == 0 ? 0 : consonantSequenceCharacters / letters;
-    features[5] = _hasSuspiciousTld(host, lastDot) ? 1 : 0;
-  }
-
-  static bool _hasSuspiciousTld(Uint8List host, int lastDot) {
-    if (lastDot < 0) return false;
-    final tldLength = host.length - lastDot - 1;
-    for (final tld in suspiciousTlds) {
-      if (tld.length != tldLength) continue;
-      var matches = true;
-      for (var index = 0; index < tldLength; index++) {
-        if (host[lastDot + 1 + index] != tld.codeUnitAt(index)) {
-          matches = false;
-          break;
-        }
-      }
-      if (matches) return true;
-    }
-    return false;
-  }
 
   static bool _evaluateEnsemble(
     Float64List features,

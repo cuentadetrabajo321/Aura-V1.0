@@ -17,6 +17,7 @@ import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.Inet4Address
+import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -329,16 +330,16 @@ mapdns:
         .setMtu(1500)
         .addAddress("10.0.0.2", 24)
         .addAddress("fd00::2", 64)
+        // Full routes capture TCP and UDP on both IP families for tunnel inspection.
         .addRoute("0.0.0.0", 0)
         .addRoute("::", 0)
         .addDnsServer("10.0.0.3")
 
     private fun resolveProxyAddress(): String {
-        return InetAddress.getAllByName(SOCKS5_HOST)
-            .filterIsInstance<Inet4Address>()
-            .firstOrNull()
-            ?.hostAddress
-            ?: throw IOException("No se pudo resolver el endpoint SOCKS5 IPv4.")
+        val addresses = InetAddress.getAllByName(SOCKS5_HOST)
+        return addresses.firstOrNull { it is Inet6Address }?.hostAddress
+            ?: addresses.firstOrNull { it is Inet4Address }?.hostAddress
+            ?: throw IOException("No se pudo resolver el endpoint SOCKS5 en IPv4 o IPv6.")
     }
 
     private fun verifySocks5(address: String) {
@@ -374,11 +375,11 @@ mapdns:
             return connection.inputStream.bufferedReader().useLines { lines ->
                 lines.asSequence()
                     .map { it.substringBefore('#').trim() }
-                    .filter(::isIpv4Address)
+                    .filter(::isIpAddress)
                     .take(MAX_BLOCKED_IPS)
                     .toCollection(HashSet())
             }.also {
-                if (it.isEmpty()) throw IOException("El feed no contiene direcciones IPv4 válidas.")
+                if (it.isEmpty()) throw IOException("El feed no contiene direcciones IP válidas.")
             }
         } finally {
             connection.disconnect()
@@ -391,6 +392,16 @@ mapdns:
         return parts.all { part ->
             val octet = part.toIntOrNull()
             octet != null && octet in 0..255 && octet.toString() == part
+        }
+    }
+
+    private fun isIpAddress(value: String): Boolean {
+        if (isIpv4Address(value)) return true
+        if (!value.contains(':')) return false
+        return try {
+            InetAddress.getByName(value) is Inet6Address
+        } catch (_: IOException) {
+            false
         }
     }
 

@@ -29,8 +29,9 @@ def load_model() -> dict:
         model = json.load(stream)
     if model.get("model_type") != "random_forest":
         raise ValueError("Model candidate is not a random_forest")
-    if model.get("feature_order") != FEATURE_ORDER:
-        raise ValueError("Model feature_order does not match the Dart inference contract")
+    model_feature_order = model.get("feature_order")
+    if model_feature_order not in (FEATURE_ORDER[:6], FEATURE_ORDER):
+        raise ValueError("Model feature_order does not match a supported inference contract")
     if not isinstance(model.get("trees"), list) or len(model["trees"]) != EXPECTED_TREE_COUNT:
         raise ValueError("Model candidate must contain exactly 500 trees")
     return model

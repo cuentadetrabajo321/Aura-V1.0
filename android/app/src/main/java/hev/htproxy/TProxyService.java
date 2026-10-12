@@ -40,4 +40,16 @@ public final class TProxyService {
         com.ciberdefensa.aura.AuraNetworkStream.INSTANCE.emitDnsEvent(
                 domain, action, sourceAddress, sourcePort);
     }
+
+    public static void dispatchSniEvent(
+            String domain, String destinationAddress, int destinationPort) {
+        com.ciberdefensa.aura.AuraNetworkStream.INSTANCE.emitSniEvent(
+                domain, destinationAddress, destinationPort);
+    }
+
+    public static void dispatchEncryptedDnsEvent(
+            String destinationAddress, int destinationPort, String transportProtocol) {
+        com.ciberdefensa.aura.AuraNetworkStream.INSTANCE.emitEncryptedDnsEvent(
+                destinationAddress, destinationPort, transportProtocol);
+    }
 }
