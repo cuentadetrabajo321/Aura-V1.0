@@ -38,6 +38,9 @@ android {
         targetSdk 34
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+
+        // RESUELVE EL ERROR DE RAÍZ: Inyecta la firma SHA256 requerida por tu MainActivity.kt
+        buildConfigField "String", "AURA_ALLOWED_CERT_SHA256", "\"${System.getenv('AURA_ALLOWED_CERT_SHA256') ?: '00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00'}\""
     }
 
     buildFeatures {
@@ -71,24 +74,6 @@ dependencies {
 
 flutter {
     source '../..'
-}
-
-def releaseSigningVariables = [
-    "AURA_KEYSTORE_PATH",
-    "AURA_STORE_PASSWORD",
-    "AURA_KEY_ALIAS",
-    "AURA_KEY_PASSWORD"
-]
-
-tasks.register("printReleaseSigning") {
-    group = "verification"
-    description = "Prints the configured release signing identity without exposing credentials."
-    doLast {
-        def releaseSigningConfig = android.buildTypes.getByName("release").signingConfig
-        println "STORE_FILE=${releaseSigningConfig.storeFile?.absolutePath ?: ''}"
-        println "KEY_ALIAS=${releaseSigningConfig.keyAlias ?: ''}"
-        println "IS_DEBUG_SIGNING=${releaseSigningConfig == android.signingConfigs.debug}"
-    }
 }
 
 def hevSourceDir = file("src/main/cpp/hev-socks5-tunnel")
