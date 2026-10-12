@@ -73,6 +73,24 @@ flutter {
     source '../..'
 }
 
+def releaseSigningVariables = [
+    "AURA_KEYSTORE_PATH",
+    "AURA_STORE_PASSWORD",
+    "AURA_KEY_ALIAS",
+    "AURA_KEY_PASSWORD"
+]
+
+tasks.register("printReleaseSigning") {
+    group = "verification"
+    description = "Prints the configured release signing identity without exposing credentials."
+    doLast {
+        def releaseSigningConfig = android.buildTypes.getByName("release").signingConfig
+        println "STORE_FILE=${releaseSigningConfig.storeFile?.absolutePath ?: ''}"
+        println "KEY_ALIAS=${releaseSigningConfig.keyAlias ?: ''}"
+        println "IS_DEBUG_SIGNING=${releaseSigningConfig == android.signingConfigs.debug}"
+    }
+}
+
 def hevSourceDir = file("src/main/cpp/hev-socks5-tunnel")
 def hevBuildDir = layout.buildDirectory.dir("generated/hev-tun2socks")
 def hevJniLibsDir = hevBuildDir.map { it.dir("jniLibs") }
