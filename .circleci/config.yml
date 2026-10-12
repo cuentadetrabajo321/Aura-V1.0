@@ -1,0 +1,46 @@
+version: 2.1
+
+executors:
+  android-flutter:
+    docker:
+      - image: cirrusci/flutter:stable
+    environment:
+      _JAVA_OPTIONS: "-Xmx3g"
+      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dorg.gradle.parallel=false -Dorg.gradle.workers.max=1"
+
+jobs:
+  build-apk:
+    executor: android-flutter
+    steps:
+      - checkout
+      
+      - run:
+          name: Instalar dependencias del proyecto
+          command: flutter pub get
+
+      - run:
+          name: Configurar permisos de ejecucion
+          command: |
+            chmod +x tool/compile_aura.sh || true
+            chmod +x android/gradlew || true
+
+      - run:
+          name: Crear Keystore e Iniciar Compilacion Real del APK
+          environment:
+            AURA_STORE_PASSWORD: "android"
+            AURA_KEY_ALIAS: "androidreleasekey"
+            AURA_KEY_PASSWORD: "android"
+            AURA_KEYSTORE_PATH: "android/app/aura-release.keystore"
+            AURA_BUILD_FORMAT: "apk"
+          command: bash tool/compile_aura.sh
+
+      - store_artifacts:
+          path: build/app/outputs/flutter-apk/app-release.apk
+          destination: Aura-Mobile-Defens-APK
+
+workflows:
+  version: 2
+  compile-workflow:
+    jobs:
+      - build-apk
+      
