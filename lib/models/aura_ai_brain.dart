@@ -40,12 +40,19 @@ abstract final class AuraAIInference {
     required String rawData,
     required Map<String, dynamic> modelStructure,
     required List<String> suspiciousTlds,
+    bool blocklistChecked = false,
   }) async {
+    final domains = shared_features.AuraAIInference
+        .extractDomainsForBlocklist(rawData);
+    final blockedDomains = blocklistChecked
+        ? <String>{}
+        : await shared_features.AuraAIInference.findBlocklistedDomains(domains);
     final serializedResult = await Isolate.run<Map<String, Object?>>(
       () => _processInBackground(
         rawData,
         modelStructure,
         suspiciousTlds,
+        blockedDomains.toList(growable: false),
       ),
     );
     final rawResults = serializedResult['results'];
@@ -89,29 +96,49 @@ abstract final class AuraAIInference {
     String rawData,
     Map<String, dynamic> modelStructure,
     List<String> suspiciousTlds,
+    List<String> blockedDomains,
   ) {
     final hosts = _extractHosts(rawData)
         .where((host) => InternetAddress.tryParse(host) == null)
         .toList(growable: false);
     if (hosts.isEmpty) return <String, Object?>{'results': <Object?>[]};
 
+    final blocked = blockedDomains.toSet();
+    final requiresModel = hosts.any((host) => !blocked.contains(host));
     final trees = modelStructure['trees'];
-    if (trees is! List || trees.length != _expectedTreeCount) {
+    if (requiresModel && (trees is! List || trees.length != _expectedTreeCount)) {
       throw const FormatException(
         'El modelo local no contiene exactamente 500 árboles.',
       );
     }
     final suspicious = suspiciousTlds.map((tld) => tld.toLowerCase()).toSet();
+    final featureOrder = modelStructure['feature_order'];
+    final usesEnhancedFeatures = featureOrder is List &&
+        _matchesFeatureOrder(
+          featureOrder,
+          shared_features.AuraAIInference.enhancedFeatureOrder,
+        );
     final results = <Map<String, Object?>>[];
     for (final host in hosts) {
-      final features =
-          shared_features.AuraAIInference.extractEnhancedFeatures(host);
+      if (blocked.contains(host)) {
+        results.add(<String, Object?>{
+          'host': host,
+          'threat_score': 1.0,
+          'is_threat': true,
+          'features': <String, double>{'blocklist_match': 1.0},
+        });
+        continue;
+      }
+      final features = shared_features.AuraAIInference.extractFeaturesForModel(
+        host,
+        featureOrder,
+      );
       features[5] =
           suspicious.contains(host.substring(host.lastIndexOf('.') + 1))
               ? 1.0
               : 0.0;
       var threatVotes = 0;
-      for (final tree in trees) {
+      for (final tree in trees as List) {
         if (tree is! Map || !tree.containsKey('root')) {
           throw const FormatException('Raíz de árbol inválida en el bosque.');
         }
@@ -131,7 +158,10 @@ abstract final class AuraAIInference {
           'consonant_sequence_ratio': features[4],
           'suspicious_tld': features[5],
           for (var index = 6;
-              index < shared_features.AuraAIInference.enhancedFeatureOrder.length;
+              usesEnhancedFeatures &&
+                  index <
+                      shared_features
+                          .AuraAIInference.enhancedFeatureOrder.length;
               index++)
             shared_features.AuraAIInference.enhancedFeatureOrder[index]:
                 features[index],
@@ -144,6 +174,17 @@ abstract final class AuraAIInference {
       });
     }
     return <String, Object?>{'results': results};
+  }
+
+  static bool _matchesFeatureOrder(
+    List<dynamic> actual,
+    List<String> expected,
+  ) {
+    if (actual.length != expected.length) return false;
+    for (var index = 0; index < expected.length; index++) {
+      if (actual[index] != expected[index]) return false;
+    }
+    return true;
   }
 
   static List<String> _extractHosts(String rawData) {

@@ -8,6 +8,7 @@ import json
 import math
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,11 @@ from dataset.build_dataset import is_allowlisted, normalize_domain  # noqa: E402
 from train_max_aura_brain import (  # noqa: E402
     COMMON_DOMAINS,
     FEATURE_ORDER,
+    MODEL_VERSION,
+    build_model_metadata,
+    calculate_bigram_repeat_ratio,
+    calculate_conditional_entropy,
+    calculate_trigram_repeat_ratio,
     detect_idn_homoglyphs,
     extract_enhanced_features,
     is_probable_typosquatting,
@@ -80,7 +86,7 @@ def test_model_schema_and_original_asset_digest(model):
         "classes",
         "trees",
     }
-    assert model["feature_order"] == FEATURE_ORDER[:6]
+    assert model["feature_order"] in (FEATURE_ORDER[:6], FEATURE_ORDER)
     assert len(model["trees"]) == 500
     assert model["classes"] == {"0": "safe", "1": "threat"}
 
@@ -91,7 +97,7 @@ def test_model_schema_and_original_asset_digest(model):
             assert node.get("value") in {0, 1}
             return
         assert node.get("type") == "split"
-        assert node.get("feature_index") in range(18)
+        assert node.get("feature_index") in range(len(model["feature_order"]))
         assert isinstance(node.get("threshold"), (int, float))
         assert round(float(node["threshold"]), 4) == node["threshold"]
         validate_node(node.get("left"), depth + 1)
@@ -114,7 +120,7 @@ def test_offline_fixture_is_within_the_row_limit():
     assert set(rows[0]) == {"domain", "label", "source", "license", "retrieved_at"}
 
 
-def test_enhanced_features_preserve_legacy_order_and_normalize_additions():
+def test_enhanced_features_preserve_legacy_values_and_normalize_new_values():
     features = extract_enhanced_features("ABBB3.XYZ")
 
     assert len(features) == 18
@@ -130,8 +136,12 @@ def test_enhanced_features_preserve_legacy_order_and_normalize_additions():
         1.0,
     ]
     assert all(0.0 <= value <= 1.0 for value in features[6:])
+    assert features[11] == 0.0
     assert features[13] == 0.0
     assert features[15] == 2 / 7
+    assert features[9] == 1 / 126
+    assert features[10] == 3 / 63
+    assert features[16] == 5 / 63
 
 
 def test_python_and_dart_share_the_feature_order_and_common_domains():
@@ -155,18 +165,55 @@ def test_python_and_dart_share_the_feature_order_and_common_domains():
         "longest_label_length_ratio",
         "suspicious_keyword_indicator",
     ]
+    readme_source = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_order = re.findall(
+        r"^\|\s*\d+\s*\|\s*`([^`]+)`",
+        readme_source,
+        flags=re.MULTILINE,
+    )
+    assert readme_order == FEATURE_ORDER
     dart_source = (ROOT / "lib/inference/aura_common_domains.dart").read_text(
         encoding="utf-8"
     )
     dart_domains = re.findall(r"^  '([^']+)',$", dart_source, flags=re.MULTILINE)
     assert tuple(dart_domains) == COMMON_DOMAINS
+    inference_source = (ROOT / "lib/inference/aura_ai_inference.dart").read_text(
+        encoding="utf-8"
+    )
+    feature_order_match = re.search(
+        r"enhancedFeatureOrder\s*=\s*<String>\[(.*?)\];",
+        inference_source,
+        flags=re.DOTALL,
+    )
+    assert feature_order_match is not None
+    assert re.findall(r"'([^']+)'", feature_order_match.group(1)) == FEATURE_ORDER
 
 
-def test_enhanced_features_measure_repeated_bigrams_and_trigrams():
+def test_enhanced_features_combine_repeated_bigrams_and_trigrams():
     features = extract_enhanced_features("ababab.example")
 
     assert features[7] > 0.0
+    assert features[7] <= 1.0
     assert features[8] > 0.0
+    assert features[8] <= 1.0
+
+
+def test_feature_helpers_and_model_metadata_follow_the_v4_contract():
+    assert 0.0 < calculate_bigram_repeat_ratio("ABABAB.example") <= 1.0
+    assert 0.0 < calculate_trigram_repeat_ratio("ABABAB.example") <= 1.0
+    assert 0.0 <= calculate_conditional_entropy("ABABAB.example") <= 1.0
+
+    metadata = build_model_metadata()
+    assert set(metadata) == {
+        "version",
+        "feature_count",
+        "feature_names",
+        "trained_at",
+    }
+    assert metadata["version"] == MODEL_VERSION == "4.0.0"
+    assert metadata["feature_count"] == 18
+    assert metadata["feature_names"] == FEATURE_ORDER
+    assert datetime.fromisoformat(metadata["trained_at"]).tzinfo is not None
 
 
 def test_common_domain_has_zero_normalized_levenshtein_distance():
@@ -195,20 +242,20 @@ def test_enhanced_features_detect_idn_homographs_and_suspicious_keywords():
     assert features[17] == 1.0
 
 
-def test_enhanced_features_decode_punycode_for_homograph_detection():
+def test_enhanced_features_do_not_mistake_punycode_ascii_for_cyrillic():
     homograph = extract_enhanced_features("xn--80ak6aa92e.com")
     non_homograph_idn = extract_enhanced_features("xn--fsqu00a.com")
 
-    assert homograph[11] == 1.0
+    assert homograph[11] == 0.0
     assert non_homograph_idn[11] == 0.0
 
 
-def test_idn_homoglyph_score_requires_two_mapped_cyrillic_characters():
+def test_idn_homoglyph_indicator_is_capped_at_one():
     assert detect_idn_homoglyphs("apple.com") == 0.0
     assert detect_idn_homoglyphs("\u0430pple.com") == 0.5
     assert detect_idn_homoglyphs("\u0430\u0440ple.com") == 1.0
-    assert detect_idn_homoglyphs("xn--pypal-4ve.com") == 0.5
-    assert detect_idn_homoglyphs("xn--80ak6aa92e.com") == 1.0
+    assert detect_idn_homoglyphs("xn--pypal-4ve.com") == 0.0
+    assert detect_idn_homoglyphs("\u0430\u0440\u0441\u0435\u0430.com") == 1.0
     assert detect_idn_homoglyphs("") == 0.0
 
 

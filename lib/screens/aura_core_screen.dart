@@ -26,6 +26,8 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
       MethodChannel('com.ciberdefensa.aura/voice');
   static const MethodChannel _shieldChannel =
       MethodChannel('com.ciberdefensa.aura/shield');
+  static const MethodChannel _telemetryChannel =
+      MethodChannel('com.ciberdefensa.aura/telemetry');
 
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -212,6 +214,113 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
     }
   }
 
+  Future<void> _showTelemetrySettings() async {
+    try {
+      final rawStatus = await _telemetryChannel.invokeMethod<Object?>(
+        'domainTelemetryStatus',
+      );
+      if (rawStatus is! Map ||
+          rawStatus['optedIn'] is! bool ||
+          rawStatus['endpointConfigured'] is! bool) {
+        throw const FormatException(
+          'Android devolvió un estado de telemetría inválido.',
+        );
+      }
+      if (!mounted) return;
+      var optedIn = rawStatus['optedIn'] as bool;
+      final endpointConfigured = rawStatus['endpointConfigured'] as bool;
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) => AlertDialog(
+            backgroundColor: const Color(0xFF07110E),
+            title: const Text(
+              'Telemetría de detecciones',
+              style: TextStyle(color: _terminalGreen, fontFamily: 'monospace'),
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text(
+                      'Compartir telemetría opcional',
+                      style: TextStyle(color: _terminalGreen),
+                    ),
+                    subtitle: Text(
+                      endpointConfigured
+                          ? 'Opcional. Solo se envían hashes SHA-256 y la '
+                              'clasificación; nunca el dominio en claro.'
+                          : 'No disponible: falta configurar el endpoint HTTPS.',
+                      style: const TextStyle(
+                        color: _terminalYellow,
+                        fontSize: 11,
+                      ),
+                    ),
+                    value: optedIn,
+                    onChanged: endpointConfigured || optedIn
+                        ? (value) async {
+                            if (value && !endpointConfigured) return;
+                            try {
+                              final persisted =
+                                  await _telemetryChannel.invokeMethod<bool>(
+                                        'setDomainTelemetryOptIn',
+                                        value,
+                                      ) ??
+                                      false;
+                              if (!dialogContext.mounted) return;
+                              setDialogState(() => optedIn = persisted);
+                            } on Object catch (error) {
+                              if (!dialogContext.mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    'No se pudo guardar el consentimiento: $error',
+                                  ),
+                                ),
+                              );
+                            }
+                          }
+                        : null,
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'Se incluyen versión del modelo y de la app, hora y '
+                    'resultado, fuente de decisión y modelo. Los hashes de dominios '
+                    'comunes pueden adivinarse. El servidor debe evitar guardar '
+                    'IP u otros identificadores en sus logs. Puedes retirar el '
+                    'consentimiento aquí; al desactivarlo se elimina la cola '
+                    'pendiente.',
+                    style: TextStyle(
+                      color: Colors.white70,
+                      fontSize: 11,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text(
+                  'Cerrar',
+                  style: TextStyle(color: _terminalGreen),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    } on Object catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo abrir el ajuste: $error')),
+      );
+    }
+  }
+
   void _scrollToLatest(int eventCount, {bool force = false}) {
     if (!force && eventCount == _lastRenderedEventCount) return;
     _lastRenderedEventCount = eventCount;
@@ -233,7 +342,16 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
             const SizedBox(height: 48),
             Row(
               children: [
-                const SizedBox(width: 48),
+                IconButton(
+                  tooltip: 'Privacidad y telemetría opcional',
+                  onPressed: _showTelemetrySettings,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 48, height: 48),
+                  icon: const Icon(
+                    Icons.tune,
+                    color: _terminalYellow,
+                  ),
+                ),
                 const Expanded(
                   child: Text(
                     'Aura Mobile Defens',

@@ -54,40 +54,91 @@ Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el 
 |---|---|---|
 | 1. Entorno hostil | Detecciones nativas de root, gestores como Magisk/KernelSU, instrumentación, emuladores y señales de integridad. | Son heurísticas de defensa en dispositivo; no constituyen garantía contra evasión o manipulación del sistema. |
 | 2. Inventario de apps | `AuraAppGenomeScanner` evalúa aplicaciones instaladas, permisos sensibles, firmas y señales de ofuscación. | La visibilidad de paquetes depende de las políticas de visibilidad de Android y permisos disponibles. |
-| 3. Clasificación ML | Vector sincronizado Python/Dart de 18 características, incluyendo typosquatting, n-gramas y homógrafos IDN. | El modelo publicado (`3.0.0`) conserva el esquema entrenado de seis características; para aprovechar las doce nuevas se requiere reentrenar, validar y publicar un modelo compatible de 18 características. Las puntuaciones del bosque son votos, no probabilidades calibradas. |
+| 3. Clasificación ML | Vector sincronizado Python/Dart de 18 características: seis valores históricos sin reescalar y doce características nuevas normalizadas, incluyendo typosquatting, n-gramas, estructura e indicadores IDN. | El modelo publicado (`3.0.0`) conserva el esquema entrenado de seis características; el entrenador produce candidatos compatibles con el nuevo vector (`4.0.0`). Para usarlo en producción se requiere reentrenar, validar y publicar el modelo. Las puntuaciones del bosque son votos, no probabilidades calibradas. |
 | 4. Red | Rutas TUN completas IPv4/IPv6, inspección TCP SNI, eventos para inferencia en Dart y bloqueo de UDP DNS cifrado hacia resolutores conocidos. | QUIC/DoQ no tiene extracción SNI; la cobertura depende de las IP conocidas y puede verse reducida por ECH u otros resolutores. La inspección se implementa en userspace, no con `iptables`/`ip6tables`. |
 | 5. Cadena de suministro | Workflow de SBOM CycloneDX y generación de provenance SLSA firmada mediante OIDC para artefactos Android. | El generador genérico de provenance no demuestra por sí solo todos los requisitos de construcción y fuente necesarios para afirmar conformidad SLSA Level 3 integral. |
 
 ### Contrato de características
 
-El vector conserva los seis valores originales en los mismos índices y agrega doce valores normalizados a `[0, 1]`. Python (`extract_enhanced_features`) y Dart (`AuraAIInference.extractEnhancedFeatures`) comparten el orden siguiente:
+El vector mejorado contiene 18 valores. Los primeros seis conservan sin reescalar el orden, valores y significado originales; las doce características añadidas están normalizadas a `[0, 1]`. Los modelos 3.x siguen usando sus seis valores históricos. Python (`extract_enhanced_features`) y Dart (`AuraAIInference.extractEnhancedFeatures`) comparten el orden siguiente:
 
 | Índice | Campo JSON | Cálculo |
 |---:|---|---|
-| 0 | `length` | Longitud del host normalizado (valor legado, sin reescalar). |
-| 1 | `shannon_entropy` | Entropía de Shannon de los caracteres del host. |
+| 0 | `length` | Longitud original del host, sin reescalar. |
+| 1 | `shannon_entropy` | Entropía de Shannon original del host, sin reescalar. |
 | 2 | `digit_ratio` | Dígitos ASCII divididos por la longitud. |
 | 3 | `vowel_ratio` | Vocales ASCII (`a,e,i,o,u`) divididas por letras. |
 | 4 | `consonant_sequence_ratio` | Caracteres de rachas consonánticas de longitud ≥3, divididos por letras. |
 | 5 | `suspicious_tld` | `1.0` si el TLD pertenece al conjunto sospechoso del entrenador; si no, `0.0`. |
-| 6 | `min_normalized_levenshtein` | Menor distancia de Levenshtein frente al snapshot Tranco Top 1000 incluido, dividida por la longitud mayor entre host y candidato. |
-| 7 | `bigram_repeat_ratio` | Pares de caracteres repetidos, más allá de su primera aparición, dividido por el total de pares. |
-| 8 | `trigram_repeat_ratio` | Tripletes repetidos, más allá de su primera aparición, dividido por el total de tripletes. |
-| 9 | `subdomain_depth` | Número de puntos dividido por 126 (máximo compatible con un host DNS de 253 caracteres). |
+| 6 | `min_normalized_levenshtein` | Menor distancia de Levenshtein frente al snapshot Tranco Top 1000 incluido, dividida por la longitud del host y limitada a `[0, 1]`. |
+| 7 | `bigram_repeat_ratio` | N-gramas de dos caracteres repetidos, más allá de su primera aparición, divididos por el total de bigramas. |
+| 8 | `trigram_repeat_ratio` | N-gramas de tres caracteres repetidos, más allá de su primera aparición, divididos por el total de trigramas. |
+| 9 | `subdomain_depth` | Cantidad de puntos del host dividida por 126. |
 | 10 | `tld_length_ratio` | Longitud del TLD dividida por 63. |
-| 11 | `idn_homograph_indicator` | `1.0` cuando al menos dos caracteres cirílicos mapeados como confusables latinos aparecen en el host Unicode (incluidos labels Punycode decodificados); en otro caso, `0.0`. |
+| 11 | `idn_homograph_indicator` | Número de caracteres cirílicos confusables (`а`, `е`, `о`, `р`, `с`, `у`, `х`) dividido por 2 y limitado a 1. |
 | 12 | `non_ascii_ratio` | Caracteres no ASCII divididos por la longitud del host. |
-| 13 | `consecutive_digits_indicator` | Indicador binario de dos o más dígitos ASCII contiguos. |
-| 14 | `conditional_entropy` | Entropía de caracteres normalizada por longitud de cada etiqueta y ponderada por sus caracteres. |
-| 15 | `rare_character_ratio` | `q`, `x`, `z` y `k` ASCII divididos por el total de letras ASCII. |
+| 13 | `consecutive_digits_indicator` | Indicador binario de dos o más dígitos contiguos. |
+| 14 | `conditional_entropy` | Entropía media de las etiquetas, ponderada por caracteres, dividida por `log2(36)` y limitada a 1. |
+| 15 | `rare_character_ratio` | `q`, `x`, `z` y `k` divididos por el total de letras ASCII. |
 | 16 | `longest_label_length_ratio` | Longitud de la etiqueta más larga dividida por 63. |
-| 17 | `suspicious_keyword_indicator` | Indicador binario de `free`, `reward`, `update` o `system` en el host. |
+| 17 | `suspicious_keyword_indicator` | Indicador binario de `free`, `reward`, `update`, `system`, `unlock`, `premium` o `crack` en el host. |
 
-La función `detect_idn_homoglyphs` en Python y `AuraAIInference.detectIdnHomoglyphs` en Dart comparten el mapa cirílico `а→a`, `е→e`, `о→o`, `р→p`, `с→c`, `у→y`, `х→x`. El score es `min(cantidad / 2, 1)`: cero sin confusables, `0.5` con uno y `1.0` con dos o más; el campo del modelo marca sospechoso únicamente desde dos caracteres.
+La función `detect_idn_homoglyphs` en Python y `AuraAIInference.detectIdnHomoglyphs` en Dart usan el mismo mapa de siete confusables cirílicos. El valor es un indicador limitado a 1 (`confusables / 2`); las etiquetas Punycode ASCII no se decodifican en esta característica.
 
-Para typosquatting, `levenshtein_distance_to_top_domains` en Python y `AuraAIInference.levenshteinDistanceToTopDomains` en Dart retornan la mínima distancia de edición dividida por la longitud mayor del host y del dominio de referencia (`0.0` idéntico, hasta `1.0`). Ambos usan exactamente el snapshot de 1000 dominios citado arriba. `is_probable_typosquatting` / `AuraAIInference.isProbableTyposquatting` aplica el umbral de 1–2 ediciones; dominios idénticos no se clasifican como typosquatting. Ejemplo: `goggle.com` obtiene `0.1` frente a `google.com` y activa el umbral.
+Para typosquatting, `levenshtein_distance_to_top_domains` en Python y `AuraAIInference.levenshteinDistanceToTopDomains` en Dart retornan la mínima distancia de edición dividida por la longitud del host y limitada a 1 (`0.0` idéntico). Ambos usan exactamente el snapshot de 1000 dominios citado arriba. `is_probable_typosquatting` / `AuraAIInference.isProbableTyposquatting` aplica el umbral de 1–2 ediciones; dominios idénticos no se clasifican como typosquatting. Ejemplo: `goggle.com` obtiene `0.1` frente a `google.com` y activa el umbral.
 
-Las seis primeras características conservan sus valores previos para no cambiar la escala del modelo existente; las doce agregadas son normalizadas. La lista común se versiona en `tool/domain_lists/tranco_top_1000_20261012.txt` (snapshot diario de [Tranco](https://tranco-list.eu/) del 12 de octubre de 2026) y se incorpora a Dart desde `lib/inference/aura_common_domains.dart`. El modelo publicado sigue usando sus características de entrenamiento originales: debe volver a entrenarse y publicarse con el vector de 18 valores para que los árboles puedan usar los índices nuevos.
+El snapshot Tranco `4672X` (lista diaria generada el 11 de octubre de 2026) se versiona en `tool/domain_lists/tranco_top_1000_20261012.txt` y se incorpora a Dart desde `lib/inference/aura_common_domains.dart`. Los modelos identifican su orden mediante `feature_order`: las inferencias mantienen el vector legado para el modelo publicado y seleccionan el nuevo vector solo para un candidato entrenado con las 18 características.
+
+## Blocklists de dominios
+
+En Android, `AuraBlocklistService` consulta URLhaus, PhishTank y OpenPhish antes de ejecutar el bosque. Las actualizaciones se programan con WorkManager a intervalos de 24 horas y se validan contra un manifiesto HTTPS del backend Aura con este esquema:
+
+```json
+{
+  "feeds": {
+    "urlhaus": { "sha256": "<sha256 del feed>" },
+    "phishtank": { "sha256": "<sha256 del feed>" },
+    "openphish": { "sha256": "<sha256 del feed>" }
+  }
+}
+```
+
+El build Android requiere `AURA_BLOCKLIST_MANIFEST_URL` (URL HTTPS del manifiesto) y `PHISHTANK_APP_KEY` como variables de entorno de Gradle. No se programan actualizaciones hasta configurar ambos valores. La app key compilada en `BuildConfig` puede extraerse del APK; en producción, se recomienda que el backend Aura consulte PhishTank y no distribuya una credencial reutilizable en el cliente.
+
+Las generaciones verificadas se guardan bajo `files/blocklists/` en el sandbox privado de la app y se activan mediante un puntero atómico. Si falla una descarga o no coincide un hash, se conserva la generación cacheada anterior; sin ninguna generación verificada, la consulta se reporta como error y Aura no continúa al ML. El SHA-256 comprueba igualdad con los digests publicados por el backend; la autenticidad del manifiesto se basa en HTTPS y la confianza del servidor, no en una firma asimétrica del manifiesto.
+
+## Telemetría opcional de clasificación
+
+La telemetría de clasificación está **desactivada de forma predeterminada** y solo se activa mediante el switch **Ajustes → Telemetría de detecciones** en la consola Android. El usuario puede retirarla desde el mismo lugar en cualquier momento. Al desactivarla, Aura cancela el trabajo de envío activo o programado y borra la cola local pendiente. En plataformas distintas de Android no se envían estos eventos.
+
+Para habilitar el switch, configura un endpoint HTTPS real durante el build. También puedes especificar la versión efectiva del modelo; el valor predeterminado es `3.0.0`.
+
+```sh
+AURA_TELEMETRY_ENDPOINT="https://telemetry.example.org/v1/events" \
+AURA_MODEL_VERSION="4.0.0" \
+flutter build apk
+```
+
+No se incluye una URL de producción en el código. Si el endpoint falta o no es HTTPS, la opción de activación permanece deshabilitada. El endpoint debe aceptar `POST` HTTPS y responder con un estado HTTP exitoso; se rechazan redirecciones. El cuerpo tiene esta forma:
+
+```json
+{
+  "events": [
+    {
+      "hash": "<sha256 del dominio normalizado>",
+      "outcome": "blocked",
+      "source": "ml",
+      "model_version": "4.0.0",
+      "app_version": "1.0.0",
+      "ts": 1791835200000
+    }
+  ]
+}
+```
+
+`outcome` es `blocked` o `allowed`; `source` es `ml`, `blocklist` o `allowlist`. `ts` es la hora Unix en milisegundos. El hash se calcula en Android antes de persistir el evento; el dominio en claro no se añade a la cola ni al payload. La cola local usa `SharedPreferences`; se programan lotes de hasta 50 eventos cada cinco minutos o cuando se alcanza ese tamaño. El servicio encola como máximo un evento por segundo. Si una petición falla, WorkManager reintenta con backoff exponencial y mantiene los eventos mientras el opt-in siga activo.
+
+**Consideraciones de privacidad y métricas:** el payload no contiene dominio en claro, IP, ID de dispositivo ni ubicación, pero una conexión HTTPS necesariamente expone la IP al servidor y a intermediarios de red. El operador del endpoint debe minimizar o desactivar los logs de IP y evitar añadir identificadores en sus propios sistemas. SHA-256 no es anonimización irreversible: los dominios comunes pueden recuperarse mediante diccionarios. `outcome` registra la clasificación prevista, no confirma que se haya aplicado correctamente una regla DNS ni constituye una etiqueta de verdad de referencia. Por sí sola, esta telemetría no calcula Recall; medirlo requiere comparar predicciones con etiquetas verificadas y diseñar esa correlación preservando la privacidad.
 
 ## 2. Incisiones integradas
 
@@ -113,7 +164,9 @@ Merges posteriores también están en `main`: arreglo de `hashFiles()` inválido
 
 ## 3. Brain v2
 
-Asset publicado: [`assets/model/aura_brain_model.json`](assets/model/aura_brain_model.json). Esquema actual: `random_forest`, clases `safe`/`threat` y seis características originales. El nuevo vector de 18 campos está listo para el próximo entrenamiento; el asset publicado no se regenera sin los splits de entrenamiento versionados.
+Asset publicado: [`assets/model/aura_brain_model.json`](assets/model/aura_brain_model.json). Esquema actual: `random_forest`, clases `safe`/`threat` y seis características originales. El nuevo vector de 15 campos está listo para el próximo entrenamiento; el asset publicado no se regenera sin los splits de entrenamiento versionados.
+
+El entrenador genera candidatos `4.0.0` con `feature_order` y `metadata` (`version`, `feature_count`, `feature_names`, `trained_at`) para las 18 características. El preset móvil cuantiza los umbrales a cuatro decimales y solo selecciona modelos de menos de 4 MiB; además, exige al menos 500 filas por clase en cada split, incluido test. El asset publicado seguirá en `3.0.0` hasta que se ejecute el entrenamiento con los splits disponibles y se publique el candidato firmado.
 
 | Propiedad | Valor real |
 |---|---:|

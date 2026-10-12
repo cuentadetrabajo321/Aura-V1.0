@@ -13,7 +13,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from train_max_aura_brain import FEATURE_ORDER, extract_maximum_features
+from train_max_aura_brain import (
+    FEATURE_ORDER,
+    LEGACY_FEATURE_ORDER,
+    extract_enhanced_features,
+    extract_legacy_features,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATH = ROOT / "assets/model/aura_brain_model.json"
@@ -30,7 +35,7 @@ def load_model() -> dict:
     if model.get("model_type") != "random_forest":
         raise ValueError("Model candidate is not a random_forest")
     model_feature_order = model.get("feature_order")
-    if model_feature_order not in (FEATURE_ORDER[:6], FEATURE_ORDER):
+    if model_feature_order not in (LEGACY_FEATURE_ORDER, FEATURE_ORDER):
         raise ValueError("Model feature_order does not match a supported inference contract")
     if not isinstance(model.get("trees"), list) or len(model["trees"]) != EXPECTED_TREE_COUNT:
         raise ValueError("Model candidate must contain exactly 500 trees")
@@ -61,7 +66,11 @@ def evaluate_node(node: dict, features: list[float], depth: int = 0) -> int:
 
 
 def predict_threat(model: dict, domain: str) -> bool:
-    features = extract_maximum_features(domain)
+    features = (
+        extract_enhanced_features(domain)
+        if model["feature_order"] == FEATURE_ORDER
+        else extract_legacy_features(domain)
+    )
     votes = sum(evaluate_node(tree.get("root"), features) for tree in model["trees"])
     return votes / len(model["trees"]) >= 0.5
 

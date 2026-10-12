@@ -74,7 +74,7 @@ void main() {
   });
 
   group('AuraAIInference feature calculations', () {
-    test('preserves the six legacy feature values and exposes the full vector', () {
+    test('preserves legacy values and normalizes the twelve added features', () {
       final features = AuraAIInference.extractFeatures('ABBB3.XYZ');
       final enhanced =
           AuraAIInference.extractEnhancedFeatures('ABBB3.XYZ');
@@ -118,9 +118,14 @@ void main() {
         6 / 7,
         1,
       ]);
-      expect(enhanced.skip(6).every((value) => value >= 0 && value <= 1), isTrue);
+      expect(
+        enhanced.skip(6).every((value) => value >= 0 && value <= 1),
+        isTrue,
+      );
+      expect(enhanced[11], 0);
       expect(enhanced[13], 0);
       expect(enhanced[15], closeTo(2 / 7, 1e-12));
+      expect(features['length'], 9);
     });
 
     test('detects IDN homographs and suspicious keyword patterns', () {
@@ -134,10 +139,10 @@ void main() {
       expect(features[17], 1);
     });
 
-    test('decodes punycode without flagging every IDN', () {
+    test('does not mistake Punycode ASCII for Cyrillic homoglyphs', () {
       expect(
         AuraAIInference.extractEnhancedFeatures('xn--80ak6aa92e.com')[11],
-        1,
+        0,
       );
       expect(
         AuraAIInference.extractEnhancedFeatures('xn--fsqu00a.com')[11],
@@ -145,19 +150,22 @@ void main() {
       );
     });
 
-    test('scores mapped Cyrillic homoglyphs and flags two or more', () {
+    test('scores mapped Cyrillic homoglyphs as a capped indicator', () {
       expect(AuraAIInference.detectIdnHomoglyphs('apple.com'), 0);
-      expect(AuraAIInference.detectIdnHomoglyphs('\u0430pple.com'), 0.5);
+      expect(
+        AuraAIInference.detectIdnHomoglyphs('\u0430pple.com'),
+        0.5,
+      );
       expect(
         AuraAIInference.detectIdnHomoglyphs('\u0430\u0440ple.com'),
         1,
       );
       expect(
         AuraAIInference.detectIdnHomoglyphs('xn--pypal-4ve.com'),
-        0.5,
+        0,
       );
       expect(
-        AuraAIInference.detectIdnHomoglyphs('xn--80ak6aa92e.com'),
+        AuraAIInference.detectIdnHomoglyphs('\u0430\u0440\u0441\u0435\u0430.com'),
         1,
       );
       expect(AuraAIInference.detectIdnHomoglyphs(''), 0);
@@ -172,7 +180,7 @@ void main() {
       expect(auraCommonDomains, source);
       expect(
         AuraAIInference.extractEnhancedFeatures('google.com')[6],
-        0,
+        0.0,
       );
       expect(
         AuraAIInference.levenshteinDistanceToTopDomains('goggle.com'),

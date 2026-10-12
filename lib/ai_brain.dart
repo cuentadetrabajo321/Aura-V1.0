@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'agent/aura_crypto_layer.dart';
 import 'agent/aura_whitelist.dart';
+import 'inference/aura_ai_inference.dart' as shared_features;
 import 'infrastructure/security/aura_dynamic_whitelist.dart';
 import 'models/aura_ai_brain.dart';
 import 'secure_vault.dart';
@@ -86,6 +87,8 @@ class AuraAIBrain {
       MethodChannel('com.aura.cyberdefense/engine');
   static const MethodChannel _shieldChannel =
       MethodChannel('com.ciberdefensa.aura/shield');
+  static const MethodChannel _telemetryChannel =
+      MethodChannel('com.ciberdefensa.aura/telemetry');
   static final List<WeakReference<AuraAIBrain>> _instances = [];
   static AuraModelIntegrityFailureHandler? onModelIntegrityFailure;
   static bool _forceRuleFallback = false;
@@ -360,9 +363,20 @@ class AuraAIBrain {
   Future<String> analyzeThreatPayload(String payload) async {
     try {
       final extractedDomains = _extractDomains(payload);
+      final blocklistedDomains = await shared_features.AuraAIInference
+          .findBlocklistedDomains(extractedDomains);
+      for (final domain in blocklistedDomains) {
+        await _recordDomainOutcome(
+          domain,
+          'blocked',
+          source: 'blocklist',
+        );
+      }
+      final blocklistResults = await _enforceBlocklistHits(blocklistedDomains);
       final protectedDomains = <String>[];
       final analyzableDomains = <String>[];
       for (final domain in extractedDomains) {
+        if (blocklistedDomains.contains(domain)) continue;
         if (AuraDynamicWhitelist.instance.isSafeHost(domain)) {
           protectedDomains.add(domain);
         } else {
@@ -370,6 +384,11 @@ class AuraAIBrain {
         }
       }
       for (final domain in protectedDomains) {
+        await _recordDomainOutcome(
+          domain,
+          'allowed',
+          source: 'allowlist',
+        );
         developer.log(
           'Dominio protegido por el Escudo Allowlist: $domain',
           name: 'AuraAIInference',
@@ -377,11 +396,10 @@ class AuraAIBrain {
         );
       }
       if (extractedDomains.isNotEmpty && analyzableDomains.isEmpty) {
-        return protectedDomains
-            .map(
-              (domain) => 'Dominio protegido por el Escudo Allowlist: $domain.',
-            )
-            .join('\n');
+        final protectedResults = protectedDomains.map(
+          (domain) => 'Dominio protegido por el Escudo Allowlist: $domain.',
+        );
+        return <String>[...blocklistResults, ...protectedResults].join('\n');
       }
       final inferencePayload = extractedDomains.isEmpty
           ? payload
@@ -413,26 +431,45 @@ class AuraAIBrain {
         rawData: inferencePayload,
         modelStructure: model,
         suspiciousTlds: _suspiciousTlds.toList(growable: false),
+        blocklistChecked: true,
       );
       if (inferenceResults.isEmpty) {
         return 'Análisis local limitado a dominios: no se encontró un dominio válido.';
       }
 
-      final results = protectedDomains
+      final results = <String>[
+        ...blocklistResults,
+        ...protectedDomains
           .map(
             (domain) => 'Dominio protegido por el Escudo Allowlist: $domain.',
-          )
-          .toList();
+          ),
+      ];
       for (final inference in inferenceResults) {
         final domain = inference.host;
         final threatScore = inference.threatScore;
         final isThreat = inference.isThreat;
         if (AuraWhitelist.isSafe(domain)) {
+          await _recordDomainOutcome(
+            domain,
+            'allowed',
+            source: 'allowlist',
+            modelVersion: model['model_version'] is String
+                ? model['model_version'] as String
+                : null,
+          );
           results.add(
             'Dominio seguro por allowlist: $domain (0% de votos de amenaza).',
           );
           continue;
         }
+        await _recordDomainOutcome(
+          domain,
+          isThreat ? 'blocked' : 'allowed',
+          source: 'ml',
+          modelVersion: model['model_version'] is String
+              ? model['model_version'] as String
+              : null,
+        );
         _stateProvider?.recordLocalForestEvaluation();
 
         if (isThreat) {
@@ -474,6 +511,68 @@ class AuraAIBrain {
       return results.join('\n');
     } on Object catch (error) {
       return 'ERROR DE ANÁLISIS LOCAL: ${error.toString()}';
+    }
+  }
+
+  Future<List<String>> _enforceBlocklistHits(Set<String> domains) async {
+    final results = <String>[];
+    for (final domain in domains) {
+      _stateProvider?.setSecurityLevel(AuraSecurityLevel.critical);
+      final arguments = <String, Object?>{'domain': domain};
+      _onToolStarted?.call('mitigate_network_threat', arguments);
+      var blocked = false;
+      Object? failure;
+      try {
+        blocked = await addDnsBlockRule(domain);
+      } on Object catch (error) {
+        failure = error;
+      }
+      final toolResult = <String, Object?>{
+        'ok': blocked,
+        'domain': domain,
+        'enforcement_scope': 'device-wide',
+        if (failure != null) 'error': failure.toString(),
+        if (!blocked && failure == null)
+          'error': 'El motor no confirmó la regla DNS.',
+      };
+      _onToolCompleted?.call(
+        'mitigate_network_threat',
+        arguments,
+        toolResult,
+      );
+      results.add(
+        'AMENAZA: $domain (blocklist verificada; no se ejecutó ML); '
+        '${blocked ? 'bloqueo confirmado' : 'bloqueo no confirmado'}.',
+      );
+    }
+    return results;
+  }
+
+  Future<void> _recordDomainOutcome(
+    String domain,
+    String outcome, {
+    required String source,
+    String? modelVersion,
+  }) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _telemetryChannel.invokeMethod<bool>(
+        'recordDomainOutcome',
+        <String, Object>{
+          'domain': domain,
+          'outcome': outcome,
+          'source': source,
+          if (modelVersion != null) 'model_version': modelVersion,
+        },
+      );
+    } on Object catch (error, stackTrace) {
+      developer.log(
+        'No se pudo encolar el evento opcional de telemetría.',
+        name: 'AuraTelemetry',
+        error: error,
+        stackTrace: stackTrace,
+        level: 900,
+      );
     }
   }
 

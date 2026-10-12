@@ -45,10 +45,30 @@ FEATURE_ORDER = [
     "longest_label_length_ratio",
     "suspicious_keyword_indicator",
 ]
+LEGACY_FEATURE_ORDER = FEATURE_ORDER[:6]
 SUSPICIOUS_TLDS = {
-    "cam", "click", "country", "date", "download", "fit", "gq", "loan",
-    "mov", "party", "review", "rest", "stream", "support", "tk", "top",
-    "wang", "work", "xyz", "zip",
+    "cam",
+    "cc",
+    "click",
+    "country",
+    "date",
+    "download",
+    "fit",
+    "gq",
+    "info",
+    "loan",
+    "mov",
+    "party",
+    "review",
+    "rest",
+    "stream",
+    "support",
+    "tk",
+    "top",
+    "wang",
+    "work",
+    "xyz",
+    "zip",
 }
 DATASET_DIR = ROOT / "data"
 REPORTS_DIR = ROOT / "tool/reports"
@@ -62,6 +82,15 @@ MOBILE_SIZE_TRIALS = REPORTS_DIR / "mobile_size_trials.json"
 MAX_MOBILE_MODEL_BYTES = 4 * 1024 * 1024
 EXPECTED_CLASSES = {0, 1}
 MIN_TEST_ROWS_PER_CLASS = 500
+
+
+def build_model_metadata():
+    return {
+        "version": MODEL_VERSION,
+        "feature_count": len(FEATURE_ORDER),
+        "feature_names": FEATURE_ORDER,
+        "trained_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def normalize_domain(value):
@@ -95,7 +124,7 @@ def calculate_shannon_entropy(domain_string):
     )
 
 
-IDN_CONFUSABLES = {
+CYRILLIC_CONFUSABLES = {
     "а": "a",
     "е": "e",
     "о": "o",
@@ -104,36 +133,30 @@ IDN_CONFUSABLES = {
     "у": "y",
     "х": "x",
 }
-_SUSPICIOUS_KEYWORDS = ("free", "reward", "update", "system")
+_SUSPICIOUS_KEYWORDS = frozenset(
+    {"free", "reward", "update", "system", "unlock", "premium", "crack"}
+)
 _RARE_CHARACTERS = frozenset("qxzk")
 
 
 @lru_cache(maxsize=65536)
 def _minimum_top_domain_distance(host):
     closest_distance = math.inf
-    closest_normalized_distance = 1.0
     for common_domain in COMMON_DOMAINS:
         length_difference = abs(len(host) - len(common_domain))
-        denominator = max(len(host), len(common_domain))
-        normalized_lower_bound = length_difference / denominator
-        if (
-            length_difference >= closest_distance
-            and normalized_lower_bound >= closest_normalized_distance
-        ):
+        if length_difference >= closest_distance:
             continue
         distance = Levenshtein.distance(host, common_domain)
-        normalized_distance = distance / denominator
         if distance < closest_distance:
             closest_distance = distance
-        if normalized_distance < closest_normalized_distance:
-            closest_normalized_distance = normalized_distance
-        if closest_distance == 0 and closest_normalized_distance == 0:
+        if closest_distance == 0:
             break
-    return closest_distance, closest_normalized_distance
+    normalized_distance = min(closest_distance / max(len(host), 1), 1.0)
+    return closest_distance, normalized_distance
 
 
 def levenshtein_distance_to_top_domains(domain):
-    """Return minimum edit distance / longer domain length, in [0, 1]."""
+    """Return minimum edit distance / host length, capped to [0, 1]."""
     host = normalize_domain(domain)
     if not host:
         return 1.0
@@ -164,36 +187,34 @@ def _repeated_ngram_ratio(value, size):
     return (len(grams) - len(set(grams))) / len(grams)
 
 
-def _conditional_label_entropy(labels):
+def calculate_bigram_repeat_ratio(host):
+    return _repeated_ngram_ratio(normalize_domain(host), 2)
+
+
+def calculate_trigram_repeat_ratio(host):
+    return _repeated_ngram_ratio(normalize_domain(host), 3)
+
+
+def calculate_conditional_entropy(host):
     character_count = 0
     weighted_entropy = 0.0
-    for label in labels:
+    for label in normalize_domain(host).split("."):
         if not label:
             continue
         character_count += len(label)
         entropy = calculate_shannon_entropy(label)
-        maximum_entropy = math.log2(len(label)) if len(label) > 1 else 0.0
-        if maximum_entropy:
-            weighted_entropy += len(label) * entropy / maximum_entropy
-    return weighted_entropy / character_count if character_count else 0.0
+        weighted_entropy += entropy * len(label)
+    if not character_count:
+        return 0.0
+    return min((weighted_entropy / character_count) / math.log2(36), 1.0)
 
 
 def detect_idn_homoglyphs(domain):
-    """Return a 0–1 confusable score; two or more confusables saturate it."""
+    """Return a capped indicator score for Cyrillic Latin-lookalikes."""
     candidate = normalize_domain(domain)
     if not candidate:
         return 0.0
-
-    confusable_count = 0
-    for label in candidate.split("."):
-        if label.startswith("xn--"):
-            try:
-                label = label.encode("ascii").decode("idna")
-            except UnicodeError:
-                continue
-        confusable_count += sum(
-            character in IDN_CONFUSABLES for character in label.lower()
-        )
+    confusable_count = sum(character in CYRILLIC_CONFUSABLES for character in candidate)
     return min(confusable_count / 2.0, 1.0)
 
 
@@ -203,12 +224,53 @@ def extract_enhanced_features(domain):
     if length == 0:
         return [0.0] * len(FEATURE_ORDER)
 
-    letters = [character for character in host if character.isascii() and character.isalpha()]
+    labels = host.split(".")
+    tld = labels[-1]
+    ascii_letters = [character for character in host if character.isascii() and character.isalpha()]
+    consecutive_digits = any(
+        host[index].isascii()
+        and host[index].isdigit()
+        and host[index + 1].isascii()
+        and host[index + 1].isdigit()
+        for index in range(length - 1)
+    )
+    rare_characters = sum(character in _RARE_CHARACTERS for character in host)
+
+    return extract_legacy_features(host) + [
+        levenshtein_distance_to_top_domains(host),
+        calculate_bigram_repeat_ratio(host),
+        calculate_trigram_repeat_ratio(host),
+        min(host.count(".") / 126.0, 1.0),
+        min(len(tld) / 63.0, 1.0),
+        detect_idn_homoglyphs(host),
+        sum(not character.isascii() for character in host) / length,
+        float(consecutive_digits),
+        calculate_conditional_entropy(host),
+        rare_characters / len(ascii_letters) if ascii_letters else 0.0,
+        min(max(map(len, labels), default=0) / 63.0, 1.0),
+        float(any(keyword in host for keyword in _SUSPICIOUS_KEYWORDS)),
+    ]
+
+
+def extract_maximum_features(domain):
+    return extract_enhanced_features(domain)
+
+
+def extract_legacy_features(domain):
+    host = normalize_domain(domain)
+    length = len(host)
+    if not length:
+        return [0.0] * len(LEGACY_FEATURE_ORDER)
+
+    letters = [
+        character
+        for character in host
+        if character.isascii() and character.isalpha()
+    ]
     digits = sum(character.isascii() and character.isdigit() for character in host)
     vowels = sum(character in "aeiou" for character in letters)
-    letter_count = len(letters)
-    run_length = 0
     consonant_sequence_characters = 0
+    run_length = 0
     for character in host:
         if character.isascii() and character.isalpha() and character not in "aeiou":
             run_length += 1
@@ -218,43 +280,15 @@ def extract_enhanced_features(domain):
             run_length = 0
     if run_length >= 3:
         consonant_sequence_characters += run_length
-
-    labels = host.split(".")
-    tld = labels[-1]
-    bigram_ratio = _repeated_ngram_ratio(host, 2)
-    trigram_ratio = _repeated_ngram_ratio(host, 3)
-    non_ascii_ratio = sum(not character.isascii() for character in host) / length
-    ascii_letters = [character for character in host if character.isascii() and character.isalpha()]
-
+    tld = host.rsplit(".", 1)[-1]
     return [
         float(length),
         calculate_shannon_entropy(host),
         digits / length,
-        vowels / letter_count if letter_count else 0.0,
-        consonant_sequence_characters / letter_count if letter_count else 0.0,
+        vowels / len(letters) if letters else 0.0,
+        consonant_sequence_characters / len(letters) if letters else 0.0,
         float(tld in SUSPICIOUS_TLDS),
-        levenshtein_distance_to_top_domains(host),
-        bigram_ratio,
-        trigram_ratio,
-        min(host.count("."), 126) / 126,
-        min(len(tld), 63) / 63,
-        float(detect_idn_homoglyphs(host) >= 1.0),
-        non_ascii_ratio,
-        float(bool(re.search(r"[0-9]{2,}", host))),
-        _conditional_label_entropy(labels),
-        (
-            sum(character in _RARE_CHARACTERS for character in ascii_letters)
-            / len(ascii_letters)
-            if ascii_letters
-            else 0.0
-        ),
-        min(max(map(len, labels)), 63) / 63,
-        float(any(keyword in host for keyword in _SUSPICIOUS_KEYWORDS)),
     ]
-
-
-def extract_maximum_features(domain):
-    return extract_enhanced_features(domain)
 
 
 def read_split(path):
@@ -326,7 +360,13 @@ def predict_serialized_model(model, domain):
     trees = model.get("trees")
     if not isinstance(trees, list) or not trees:
         raise ValueError("Serialized model has no trees")
-    features = extract_maximum_features(domain)
+    model_feature_order = model.get("feature_order")
+    if model_feature_order == LEGACY_FEATURE_ORDER:
+        features = extract_legacy_features(domain)
+    elif model_feature_order == FEATURE_ORDER:
+        features = extract_enhanced_features(domain)
+    else:
+        raise ValueError("Serialized model uses an unsupported feature order")
     votes = sum(evaluate_serialized_node(tree.get("root"), features) for tree in trees)
     return votes / len(trees)
 
@@ -445,6 +485,7 @@ def train_mobile_preset():
         model = {
             "model_name": "Aura Lexical Threat Forest",
             "model_version": MODEL_VERSION,
+            "metadata": build_model_metadata(),
             "model_type": "random_forest",
             "training_status": "heuristic_seed_with_csv",
             "training_samples": len(train_rows),
@@ -494,7 +535,7 @@ def train_mobile_preset():
             f"observed_depth={observed_depth} min_samples_leaf={min_samples_leaf} "
             f"leaves={leaves} bytes={len(model_bytes)}"
         )
-        if len(model_bytes) <= MAX_MOBILE_MODEL_BYTES:
+        if len(model_bytes) < MAX_MOBILE_MODEL_BYTES:
             selected = (model, model_bytes, trial, training_seconds)
             break
         del forest, model, model_bytes
@@ -648,6 +689,7 @@ def main():
     model = {
         "model_name": "Aura Lexical Threat Forest",
         "model_version": MODEL_VERSION,
+        "metadata": build_model_metadata(),
         "model_type": "random_forest",
         "training_status": "heuristic_seed" if using_seed_fallback else "heuristic_seed_with_csv",
         "training_samples": len(training_rows),
@@ -660,7 +702,10 @@ def main():
         },
         "feature_order": FEATURE_ORDER,
         "classes": {"0": "safe", "1": "threat"},
-        "trees": [serialize_tree(estimator) for estimator in forest.estimators_],
+        "trees": [
+            serialize_tree(estimator, threshold_decimals=4)
+            for estimator in forest.estimators_
+        ],
     }
     if len(model["trees"]) != 500:
         raise RuntimeError("El bosque serializado no contiene exactamente 500 árboles.")

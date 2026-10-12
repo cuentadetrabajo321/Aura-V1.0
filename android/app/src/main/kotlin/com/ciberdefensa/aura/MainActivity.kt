@@ -165,12 +165,15 @@ class MainActivity: FlutterFragmentActivity() {
     private val ANTI_TAMPERING_CHANNEL = "com.ciberdefensa.aura/anti_tampering"
     private val SECURITY_CHANNEL = "com.ciberdefensa.aura/security"
     private val ENGINE_CHANNEL = "com.aura.cyberdefense/engine"
+    private val BLOCKLIST_CHANNEL = "com.ciberdefensa.aura/blocklist"
     private val PANIC_CHANNEL = "com.aura.cyberdefense/panic"
     private val BIOMETRICS_CHANNEL = "com.aura.cyberdefense/biometrics"
     private val NOTIFICATIONS_CHANNEL = "com.aura.cyberdefense/notifications"
     private val VOICE_CHANNEL = "com.ciberdefensa.aura/voice"
     private val NETWORK_STREAM_CHANNEL = "com.aura.cyberdefense/network_stream"
     private val genomeScannerExecutor = Executors.newSingleThreadExecutor()
+    private val blocklistExecutor = Executors.newSingleThreadExecutor()
+    private val MAX_BLOCKLIST_QUERY_DOMAINS = 10_000
     private var pendingShieldResult: MethodChannel.Result? = null
         private var pendingVoiceResult: MethodChannel.Result? = null
     private var pendingNotificationResult: MethodChannel.Result? = null
@@ -196,6 +199,88 @@ class MainActivity: FlutterFragmentActivity() {
         super.configureFlutterEngine(flutterEngine)
         registerVpnReceiver()
         AuraNetworkStream.setApplicationContext(applicationContext)
+        AuraBlocklistService.scheduleUpdates(applicationContext)
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            BLOCKLIST_CHANNEL,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "blockedDomains" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    val domains = arguments?.get("domains") as? List<*>
+                    if (
+                        domains == null ||
+                        domains.size > MAX_BLOCKLIST_QUERY_DOMAINS ||
+                        domains.any { it !is String }
+                    ) {
+                        result.error(
+                            "INVALID_BLOCKLIST_QUERY",
+                            "Se requiere una lista de dominios válida.",
+                            null,
+                        )
+                    } else {
+                        blocklistExecutor.execute {
+                            try {
+                                AuraBlocklistService.initialize(applicationContext)
+                                val blocked = domains
+                                    .filterIsInstance<String>()
+                                    .filter { domain ->
+                                        AuraBlocklistService.isDomainBlocked(domain)
+                                    }
+                                runOnUiThread { result.success(blocked) }
+                            } catch (error: AuraBlocklistService.BlocklistUnavailableException) {
+                                android.util.Log.e(
+                                    "AuraBlocklist",
+                                    "Domain classification stopped because no verified " +
+                                        "blocklist cache is available.",
+                                    error,
+                                )
+                                runOnUiThread {
+                                    result.error(
+                                        "BLOCKLIST_UNAVAILABLE",
+                                        error.message,
+                                        null,
+                                    )
+                                }
+                            } catch (error: IllegalArgumentException) {
+                                runOnUiThread {
+                                    result.error("INVALID_DOMAIN", error.message, null)
+                                }
+                            } catch (error: java.io.IOException) {
+                                android.util.Log.e(
+                                    "AuraBlocklist",
+                                    "Could not read the verified blocklist cache.",
+                                    error,
+                                )
+                                runOnUiThread {
+                                    result.error(
+                                        "BLOCKLIST_CACHE_ERROR",
+                                        error.message,
+                                        null,
+                                    )
+                                }
+                            } catch (error: IllegalStateException) {
+                                android.util.Log.e(
+                                    "AuraBlocklist",
+                                    "Blocklist service is not initialized.",
+                                    error,
+                                )
+                                runOnUiThread {
+                                    result.error(
+                                        "BLOCKLIST_UNAVAILABLE",
+                                        error.message,
+                                        null,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                else -> result.notImplemented()
+            }
+        }
 
         MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
@@ -664,6 +749,76 @@ class MainActivity: FlutterFragmentActivity() {
             TELEMETRY_CHANNEL,
         ).setMethodCallHandler { call, result ->
             when (call.method) {
+                "domainTelemetryStatus" -> {
+                    val status = AuraTelemetryService.status(applicationContext)
+                    result.success(
+                        mapOf(
+                            "optedIn" to status.optedIn,
+                            "endpointConfigured" to status.endpointConfigured,
+                        ),
+                    )
+                }
+
+                "setDomainTelemetryOptIn" -> {
+                    val optedIn = call.arguments as? Boolean
+                    if (optedIn == null) {
+                        result.error(
+                            "INVALID_TELEMETRY_CONSENT",
+                            "Se requiere una decisión de consentimiento explícita.",
+                            null,
+                        )
+                    } else {
+                        try {
+                            AuraTelemetryService.setOptIn(applicationContext, optedIn)
+                            result.success(AuraTelemetryService.status(applicationContext).optedIn)
+                        } catch (error: IllegalStateException) {
+                            android.util.Log.e(
+                                "AuraTelemetry",
+                                "Could not persist the telemetry consent choice.",
+                                error,
+                            )
+                            result.error("TELEMETRY_PREFERENCES_ERROR", error.message, null)
+                        }
+                    }
+                }
+
+                "recordDomainOutcome" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    val domain = arguments?.get("domain") as? String
+                    val outcome = arguments?.get("outcome") as? String
+                    val source = arguments?.get("source") as? String
+                    val modelVersion = arguments?.get("model_version") as? String
+                        ?: BuildConfig.AURA_MODEL_VERSION
+                    if (domain == null || outcome == null || source == null) {
+                        result.error(
+                            "INVALID_TELEMETRY_EVENT",
+                            "El evento de telemetría está incompleto.",
+                            null,
+                        )
+                    } else {
+                        try {
+                            result.success(
+                                AuraTelemetryService.recordDomainOutcome(
+                                    applicationContext,
+                                    domain,
+                                    outcome,
+                                    source,
+                                    modelVersion,
+                                ),
+                            )
+                        } catch (error: IllegalArgumentException) {
+                            result.error("INVALID_TELEMETRY_EVENT", error.message, null)
+                        } catch (error: IllegalStateException) {
+                            android.util.Log.e(
+                                "AuraTelemetry",
+                                "Could not persist a telemetry event.",
+                                error,
+                            )
+                            result.error("TELEMETRY_PREFERENCES_ERROR", error.message, null)
+                        }
+                    }
+                }
+
                 "captureRiskTelemetry" -> {
                     val appRiskList = mutableListOf<Map<String, Any>>()
                     val pm = packageManager
@@ -944,6 +1099,7 @@ class MainActivity: FlutterFragmentActivity() {
 
     override fun onDestroy() {
         genomeScannerExecutor.shutdownNow()
+        blocklistExecutor.shutdownNow()
         if (vpnReceiverRegistered) {
             unregisterReceiver(vpnStateReceiver)
             vpnReceiverRegistered = false
