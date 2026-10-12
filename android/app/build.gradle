@@ -1,197 +1,49 @@
-import java.security.KeyStore
-import java.security.MessageDigest
-
 plugins {
     id "com.android.application"
     id "kotlin-android"
     id "dev.flutter.flutter-gradle-plugin"
 }
 
-android {
-    namespace "com.ciberdefensa.aura"
-    compileSdk 36
-    ndkVersion flutter.ndkVersion
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withReader('UTF-8') { reader -> localProperties.load(reader) }
+}
 
-    buildFeatures {
-        buildConfig true
-    }
+def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '1'
+def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
+
+android {
+    namespace "com.glitch.aura"
+    compileSdk 34
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = '17'
-    }
+    kotlinOptions { jvmTarget = '17' }
 
     defaultConfig {
-        applicationId "com.ciberdefensa.aura"
-        minSdk 24
-        targetSdk 36
-        versionCode 1
-        versionName "1.0.0"
-
-        ndk {
-            abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"
-        }
-    }
-
-    signingConfigs {
-        release {
-            def keystorePath = System.getenv("AURA_KEYSTORE_PATH")
-            storeFile = keystorePath ? project.file(keystorePath).absoluteFile : null
-            storePassword = System.getenv("AURA_STORE_PASSWORD")
-            keyAlias = System.getenv("AURA_KEY_ALIAS")
-            keyPassword = System.getenv("AURA_KEY_PASSWORD")
-        }
+        applicationId "com.glitch.aura"
+        minSdk 21
+        targetSdk 34
+        versionCode flutterVersionCode.toInteger()
+        versionName flutterVersionName
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
-
 }
 
 dependencies {
-    implementation "androidx.biometric:biometric:1.1.0"
-    implementation "androidx.work:work-runtime-ktx:2.10.1"
-    implementation "androidx.core:core-ktx:1.16.0"
+    implementation "androidx.work:work-runtime-ktx:2.9.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3"
 }
 
-def signingCertificateSha256 = { signingConfig ->
-    def keystoreFile = signingConfig.storeFile
-    def storePassword = signingConfig.storePassword
-    def keyAlias = signingConfig.keyAlias
-    if (keystoreFile == null || !keystoreFile.isFile() ||
-        storePassword == null || storePassword.trim().isEmpty() ||
-        keyAlias == null || keyAlias.trim().isEmpty()) {
-        return null
-    }
-
-    def keyStore = null
-    Exception lastLoadError = null
-    [signingConfig.storeType, "JKS", "PKCS12"].findAll { it != null }.unique().each { type ->
-        if (keyStore == null) {
-            try {
-                def candidate = KeyStore.getInstance(type)
-                keystoreFile.withInputStream { stream ->
-                    candidate.load(stream, storePassword.toCharArray())
-                }
-                keyStore = candidate
-            } catch (Exception exception) {
-                lastLoadError = exception
-            }
-        }
-    }
-
-    if (keyStore == null) {
-        throw new GradleException("Could not read signing keystore '${keystoreFile}'.", lastLoadError)
-    }
-
-    def certificate = keyStore.getCertificate(keyAlias)
-    if (certificate == null) {
-        throw new GradleException("Alias '${keyAlias}' has no signing certificate in '${keystoreFile}'.")
-    }
-
-    MessageDigest.getInstance("SHA-256").digest(certificate.encoded)
-        .collect { String.format("%02X", it & 0xff) }
-        .join()
-}
-
-android.buildTypes.each { buildType ->
-    def activeSigningConfig = buildType.signingConfig
-    def activeCertificateSha256 = activeSigningConfig == null
-        ? null
-        : signingCertificateSha256(activeSigningConfig)
-    buildType.buildConfigField(
-        "String",
-        "AURA_ALLOWED_CERT_SHA256",
-        "\"${activeCertificateSha256 ?: ''}\"",
-    )
-}
-
-def releaseSigningVariables = [
-    "AURA_KEYSTORE_PATH",
-    "AURA_STORE_PASSWORD",
-    "AURA_KEY_ALIAS",
-    "AURA_KEY_PASSWORD",
-]
-
-gradle.taskGraph.whenReady { taskGraph ->
-    def releaseSigningRequested = taskGraph.allTasks.any { task ->
-        task.project == project &&
-            (task.name == "printReleaseSigning" || task.name.toLowerCase().contains("release"))
-    }
-    if (releaseSigningRequested) {
-        def missingVariables = releaseSigningVariables.findAll {
-            def value = System.getenv(it)
-            value == null || value.trim().isEmpty()
-        }
-        if (!missingVariables.isEmpty()) {
-            throw new GradleException(
-                "Missing required release signing environment variable(s): ${missingVariables.join(', ')}"
-            )
-        }
-        def keystoreFile = android.signingConfigs.release.storeFile
-        if (keystoreFile == null || !keystoreFile.isFile()) {
-            throw new GradleException(
-                "AURA_KEYSTORE_PATH must point to an existing keystore file."
-            )
-        }
-    }
-}
-
-tasks.register("printReleaseSigning") {
-    group = "verification"
-    description = "Prints the configured release signing identity without exposing credentials."
-    doLast {
-        def releaseSigningConfig = android.buildTypes.getByName("release").signingConfig
-        println "STORE_FILE=${releaseSigningConfig.storeFile?.absolutePath ?: ''}"
-        println "KEY_ALIAS=${releaseSigningConfig.keyAlias ?: ''}"
-        println "IS_DEBUG_SIGNING=${releaseSigningConfig == android.signingConfigs.debug}"
-    }
-}
-
-flutter {
-    source '../..'
-}
-
-def hevSourceDir = file("src/main/cpp/hev-socks5-tunnel")
-def hevBuildDir = layout.buildDirectory.dir("generated/hev-tun2socks")
-def hevJniLibsDir = hevBuildDir.map { it.dir("jniLibs") }
-
-android.sourceSets.main.jniLibs.srcDir(hevJniLibsDir)
-
-tasks.register("buildHevSocks5Tunnel", Exec) {
-    inputs.dir(hevSourceDir)
-    inputs.files(
-        file("src/main/cpp/aura_crypto_secure.c"),
-        file("src/main/cpp/aura_sni_firewall.c"),
-        file("src/main/cpp/aura_sni_firewall.h"),
-    )
-    outputs.dir(hevJniLibsDir)
-
-    doFirst {
-        hevBuildDir.get().asFile.mkdirs()
-        hevJniLibsDir.get().asFile.mkdirs()
-    }
-
-    commandLine(
-        file("${android.sdkDirectory}/ndk/${android.ndkVersion}/ndk-build").absolutePath,
-        "NDK_PROJECT_PATH=null",
-        "APP_BUILD_SCRIPT=${new File(hevSourceDir, 'Android.mk').absolutePath}",
-        "NDK_APPLICATION_MK=${new File(hevSourceDir, 'Application.mk').absolutePath}",
-        "NDK_OUT=${hevBuildDir.get().dir('obj').asFile.absolutePath}",
-        "NDK_LIBS_OUT=${hevJniLibsDir.get().asFile.absolutePath}",
-    )
-}
-
-tasks.named("preBuild").configure {
-    dependsOn("buildHevSocks5Tunnel")
-}
+flutter { source '../..' }
