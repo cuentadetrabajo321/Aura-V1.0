@@ -14,8 +14,10 @@ El estado se marca **En desarrollo**: el repositorio tiene workflows de validaci
 
 ```text
 ┌──────────────────────────────────── Android ────────────────────────────────────┐
-│ Persona usuaria → consentimiento VPN → AuraVpnService (Kotlin, VpnService)      │
-│                                           │ TUN                                   │
+│ Persona usuaria → consola autenticada → control Escudo VPN                       │
+│                                           │ MainActivity solicita consentimiento │
+│                                           ▼                                       │
+│                           AuraVpnService (Kotlin, VpnService) → TUN               │
 │                                           ▼                                       │
 │                              motor hev-socks5-tunnel (C)                          │
 │                         ┌─────────────┴──────────────┐                            │
@@ -32,13 +34,15 @@ El estado se marca **En desarrollo**: el repositorio tiene workflows de validaci
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Flujo de análisis: `DNS → hev-mapped-dns/motor C → JNI/eventos → Dart → AuraAIBrain → AuraAIInference en isolate → bosque serializado`. Los eventos observados por el auditor DNS, como `BLOCKED` y `DGA_ALERT`, pueden iniciar análisis. La allowlist se consulta antes del bosque. El clasificador da votos binarios por mayoría; esos votos no son probabilidades calibradas.
+Flujo de análisis: tras autenticar la consola, `AuraNetworkAuditor` escucha el EventChannel nativo. Los eventos `BLOCKED` y `DGA_ALERT` inician `DNS → hev-mapped-dns/motor C → JNI/eventos → Dart → AuraAIBrain → AuraAIInference en isolate → bosque serializado`; si el modelo confirma una amenaza, Aura solicita una regla DNS y registra si el motor la confirmó. La allowlist se consulta antes del bosque. El clasificador da votos binarios por mayoría; esos votos no son probabilidades calibradas.
 
 | Componente | Responsabilidad observada |
 |---|---|
-| `AuraVpnService` | Solicita autorización Android y mantiene la interfaz VPN foreground mientras está activa. |
+| `MainActivity` | Expone el control Escudo VPN, solicita el consentimiento del sistema y comunica el resultado del servicio a Flutter. |
+| `AuraVpnService` | Mantiene la interfaz VPN foreground y coordina el túnel mientras está activo. |
 | `hev-socks5-tunnel` | Procesa tráfico encaminado por TUN; incluye la ruta DNS mapeada y código C/JNI. |
 | Firewall C / SNI | Reglas nativas de red y reporte de hosts/eventos al lado Flutter. |
+| `AuraNetworkAuditor` | Escucha eventos DNS tras autenticar la consola, mantiene una bitácora acotada y solicita inferencia para eventos bloqueados o DGA. |
 | `AuraAIInference` | Extrae hosts, calcula las seis características y evalúa el bosque en `Isolate.run`. |
 | `AuraAIBrain` | Carga/valida el modelo local y coordina inferencia, cachés y reglas seguras. |
 | `AgentController` | Coordina órdenes, eventos y herramientas disponibles para la consola. |
@@ -265,10 +269,21 @@ tool/train_max_aura_brain.py
 
 ## 9. Build y validación
 
-Build local (requiere Flutter stable, Android SDK/NDK, JDK 17 y credenciales release):
+Para un build debug local se requiere Flutter stable, JDK 17, Android SDK Platform 36, Build Tools 36.0.0, NDK 28.2.13676358 y CMake 3.22.1. El build debug no necesita credenciales de release. Instala los componentes Android con `sdkmanager` y ejecuta:
 
 ```sh
+sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "cmake;3.22.1"
 flutter pub get
+flutter analyze
+flutter test
+flutter build apk --debug
+```
+
+El build debug se verificó con las cuatro ABI configuradas (`armeabi-v7a`, `arm64-v8a`, `x86`, `x86_64`). El proyecto usa AndroidX con Jetifier desactivado.
+
+Para generar una release se requieren credenciales de firmado:
+
+```sh
 flutter build apk --release
 ```
 

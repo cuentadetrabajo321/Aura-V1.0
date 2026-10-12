@@ -1,5 +1,6 @@
 package com.ciberdefensa.aura
 
+import android.Manifest
 import android.content.Intent
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -9,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Debug
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.content.ActivityNotFoundException
 import android.content.pm.PackageManager
 import android.content.pm.ApplicationInfo
@@ -463,7 +465,7 @@ class MainActivity: FlutterFragmentActivity() {
                             result.success(
                                 mapOf(
                                     "ok" to false,
-                                    "error" to exception.message ?: "No se pudo abrir el panel de la app.",
+                                    "error" to (exception.message ?: "No se pudo abrir el panel de la app."),
                                 ),
                             )
                         }
@@ -580,8 +582,8 @@ class MainActivity: FlutterFragmentActivity() {
                             result.success(
                                 mapOf(
                                     "ok" to false,
-                                    "error" to exception.message
-                                        ?: "No se pudo aplicar la regla DNS.",
+                                    "error" to (exception.message
+                                        ?: "No se pudo aplicar la regla DNS."),
                                     "enforcement_scope" to "device-wide",
                                 ),
                             )
@@ -623,8 +625,8 @@ class MainActivity: FlutterFragmentActivity() {
                             result.success(
                                 mapOf(
                                     "ok" to false,
-                                    "error" to exception.message
-                                        ?: "No se pudo abrir el panel de la app.",
+                                    "error" to (exception.message
+                                        ?: "No se pudo abrir el panel de la app."),
                                 ),
                             )
                         }
