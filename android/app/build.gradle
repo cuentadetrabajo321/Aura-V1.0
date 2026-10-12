@@ -14,7 +14,7 @@ def flutterVersionCode = localProperties.getProperty('flutter.versionCode') ?: '
 def flutterVersionName = localProperties.getProperty('flutter.versionName') ?: '1.0'
 
 android {
-    namespace "com.glitch.aura"
+    namespace "com.ciberdefensa.aura"
     compileSdk 34
 
     compileOptions {
