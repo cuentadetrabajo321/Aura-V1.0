@@ -41,32 +41,48 @@ cleanup_temporary_files() {
 trap cleanup_temporary_files EXIT
 
 resolve_keystore() {
-    if [[ -n "${AURA_KEYSTORE_PATH:-}" ]]; then
-        if [[ -f "$AURA_KEYSTORE_PATH" && -r "$AURA_KEYSTORE_PATH" ]]; then
-            export AURA_KEYSTORE_PATH
-            return
-        fi
-        [[ -n "${AURA_KEYSTORE_BASE64:-}" ]] ||
-            fail "AURA_KEYSTORE_PATH must reference an existing readable file, or set AURA_KEYSTORE_BASE64."
+    local keystore_path="${AURA_KEYSTORE_PATH:-}"
+    local keystore_file
+    local candidate
+    local candidates=()
+
+    if [[ -z "$keystore_path" ]]; then
+        while IFS= read -r -d '' candidate; do
+            candidates+=("$candidate")
+        done < <(find "$android_dir" -type f \( -iname '*.jks' -o -iname '*.keystore' \) -print0)
+
+        case "${#candidates[@]}" in
+            0)
+                if [[ -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
+                    fail "No physical .jks or .keystore file was found under android/. Set AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64."
+                fi
+                ;;
+            1)
+                keystore_path="${candidates[0]}"
+                ;;
+            *)
+                fail "Multiple keystore files were found under android/. Set AURA_KEYSTORE_PATH to select one."
+                ;;
+        esac
     fi
 
-    [[ -n "${AURA_KEYSTORE_BASE64:-}" ]] ||
-        fail "Missing release keystore: set AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64."
-
-    local keystore_file
-    keystore_file="$(mktemp "${TMPDIR:-/tmp}/aura-release-keystore.XXXXXX")"
-    temporary_files+=("$keystore_file")
-    chmod 0600 "$keystore_file" 2>/dev/null ||
-        fail "Could not secure the temporary Base64 keystore."
-    if [[ "$(uname -s)" == "Darwin" ]]; then
-        if ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 -D > "$keystore_file" 2>/dev/null; then
+    if [[ -z "$keystore_path" ]]; then
+        keystore_file="$(mktemp "${TMPDIR:-/tmp}/aura-release-keystore.XXXXXX")"
+        temporary_files+=("$keystore_file")
+        chmod 0600 "$keystore_file" ||
+            fail "Could not secure the temporary Base64 keystore."
+        if ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 --decode > "$keystore_file"; then
             fail "AURA_KEYSTORE_BASE64 is not valid Base64 keystore data."
         fi
-    elif ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 --decode > "$keystore_file" 2>/dev/null; then
-        fail "AURA_KEYSTORE_BASE64 is not valid Base64 keystore data."
+        [[ -s "$keystore_file" ]] ||
+            fail "AURA_KEYSTORE_BASE64 decoded to an empty keystore."
+        keystore_path="$keystore_file"
     fi
-    [[ -s "$keystore_file" ]] || fail "AURA_KEYSTORE_BASE64 decoded to an empty keystore."
-    export AURA_KEYSTORE_PATH="$keystore_file"
+
+    [[ "$keystore_path" == /* ]] || keystore_path="$project_root/$keystore_path"
+    [[ -f "$keystore_path" && -r "$keystore_path" ]] ||
+        fail "AURA_KEYSTORE_PATH must point to an existing readable keystore file."
+    export AURA_KEYSTORE_PATH="$(cd "$(dirname "$keystore_path")" && pwd -P)/$(basename "$keystore_path")"
 }
 
 require_release_signing_environment() {
@@ -76,9 +92,6 @@ require_release_signing_environment() {
     for variable in "${required_variables[@]}"; do
         [[ -n "${!variable:-}" ]] || missing_variables+=("$variable")
     done
-    if [[ -z "${AURA_KEYSTORE_PATH:-}" && -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
-        missing_variables+=("AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64")
-    fi
     ((${#missing_variables[@]} == 0)) ||
         fail "Missing required release signing environment variable(s): ${missing_variables[*]}"
 }
