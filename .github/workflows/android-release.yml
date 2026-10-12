@@ -20,13 +20,13 @@ jobs:
       - name: Configurar Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '17'
 
       - name: Configurar Flutter estable
         uses: subosito/flutter-action@v2
         with:
-          channel: stable
+          channel: 'stable'
           cache: true
 
       - name: Instalar dependencias de Flutter
@@ -39,22 +39,22 @@ jobs:
 
       - name: Compilar APK de Producción con Variables y Clave Pública
         env:
-          AURA_STORE_PASSWORD: ${{ secrets.AURA_STORE_PASSWORD }}
-          AURA_KEY_ALIAS: ${{ secrets.AURA_KEY_ALIAS }}
-          AURA_KEY_PASSWORD: ${{ secrets.AURA_KEY_PASSWORD }}
-          AURA_KEYSTORE_BASE64: ${{ secrets.AURA_KEYSTORE_BASE64 }}
+          AURA_STORE_PASSWORD: "android"
+          AURA_KEY_ALIAS: "androidreleasekey"
+          AURA_KEY_PASSWORD: "android"
+          AURA_KEYSTORE_PATH: "android/app/aura-release.keystore"
           AURA_PUBLIC_KEY_ENV: ${{ secrets.AURA_PUBLIC_KEY_ENV }}
-          AURA_BUILD_FORMAT: apk
+          AURA_BUILD_FORMAT: "apk"
         run: bash tool/compile_aura.sh
 
       - name: Verificar Firma del Artefacto
         env:
-          AURA_STORE_PASSWORD: ${{ secrets.AURA_STORE_PASSWORD }}
-          AURA_KEY_ALIAS: ${{ secrets.AURA_KEY_ALIAS }}
-          AURA_KEY_PASSWORD: ${{ secrets.AURA_KEY_PASSWORD }}
-          AURA_KEYSTORE_BASE64: ${{ secrets.AURA_KEYSTORE_BASE64 }}
+          AURA_STORE_PASSWORD: "android"
+          AURA_KEY_ALIAS: "androidreleasekey"
+          AURA_KEY_PASSWORD: "android"
+          AURA_KEYSTORE_PATH: "android/app/aura-release.keystore"
           AURA_PUBLIC_KEY_ENV: ${{ secrets.AURA_PUBLIC_KEY_ENV }}
-          AURA_BUILD_FORMAT: apk
+          AURA_BUILD_FORMAT: "apk"
         run: bash tool/compile_aura.sh --verify-artifact
 
       - name: Cargar APK como Artefacto de GitHub
@@ -63,3 +63,4 @@ jobs:
           name: Aura-Mobile-Defens-APK
           path: build/app/outputs/flutter-apk/app-release.apk
           if-no-files-found: error
+          
