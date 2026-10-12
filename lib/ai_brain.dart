@@ -80,6 +80,8 @@ class AuraAIBrain {
       'assets/model/aura_brain_model.json.sha256';
   static const String _installedModelFileName = 'aura_brain_model.enc';
   static const int _maxModelBytes = 5 * 1024 * 1024;
+  static const int _maxEncryptedModelHexBytes =
+      2 * (_maxModelBytes + 2 * 16);
   static const MethodChannel _engineChannel =
       MethodChannel('com.aura.cyberdefense/engine');
   static const MethodChannel _shieldChannel =
@@ -488,7 +490,8 @@ class AuraAIBrain {
       final secureKey = await _secureVault.getOrCreateModelMasterKey();
       if (await installedModel.exists()) {
         artifactBytes = await installedModel.readAsBytes();
-        if (artifactBytes.isEmpty || artifactBytes.length > _maxModelBytes) {
+        if (artifactBytes.isEmpty ||
+          artifactBytes.length > _maxEncryptedModelHexBytes) {
           throw const FormatException(
             'El modelo cifrado local está vacío o supera el tamaño permitido.',
           );

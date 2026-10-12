@@ -440,7 +440,6 @@ native_set_dynamic_sni_allowlist (JNIEnv *env, jobject thiz,
     if (capacity > 1024) {
         jclass exception_class =
             (*env)->FindClass (env, "java/lang/IllegalArgumentException");
-        free (parsed);
         if (exception_class)
             (*env)->ThrowNew (env, exception_class,
                               "Dynamic SNI allowlist exceeds 1024 domains.");

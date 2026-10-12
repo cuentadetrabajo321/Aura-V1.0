@@ -1,10 +1,14 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../agent/agent_controller.dart';
 import '../agent/agent_event.dart';
+import '../ai_brain.dart';
 import '../infrastructure/agent/aura_intent_parser.dart';
+import '../network_auditor.dart';
 import '../providers/aura_state_provider.dart';
 
 const Color _terminalGreen = Color(0xFF00FF00);
@@ -20,11 +24,16 @@ class AuraCoreScreen extends StatefulWidget {
 class _AuraCoreScreenState extends State<AuraCoreScreen> {
   static const MethodChannel _voiceChannel =
       MethodChannel('com.ciberdefensa.aura/voice');
+  static const MethodChannel _shieldChannel =
+      MethodChannel('com.ciberdefensa.aura/shield');
 
   final TextEditingController _inputController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  AuraNetworkAuditor? _networkAuditor;
+  StreamSubscription<NetworkAuditEvent>? _networkEventSubscription;
   bool _isListening = false;
   bool _isRunning = false;
+  bool _isShieldBusy = false;
   bool _isAuthenticated = false;
   bool _authenticationFailed = false;
   int _lastRenderedEventCount = -1;
@@ -44,6 +53,7 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
     if (!mounted) return;
     if (authenticated) {
       controller.initGreeting();
+      _startNetworkAuditor();
       setState(() => _isAuthenticated = true);
       return;
     }
@@ -60,7 +70,32 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
   void dispose() {
     _scrollController.dispose();
     _inputController.dispose();
+    unawaited(_disposeNetworkAuditor());
     super.dispose();
+  }
+
+  void _startNetworkAuditor() {
+    if (_networkAuditor != null) return;
+    final state = context.read<AuraStateProvider>();
+    final auditor = AuraNetworkAuditor(
+      aiBrain: AuraAIBrain(stateProvider: state),
+    );
+    _networkAuditor = auditor;
+    _networkEventSubscription = auditor.eventStream.listen(
+      (event) => state.addTelemetryEvent(event.toJson()),
+      onError: (Object error, StackTrace stackTrace) {
+        AgentController.instance.reportWarning(
+          'No se pudo leer la telemetría DNS local: $error',
+        );
+      },
+    );
+  }
+
+  Future<void> _disposeNetworkAuditor() async {
+    await _networkEventSubscription?.cancel();
+    await _networkAuditor?.dispose();
+    _networkEventSubscription = null;
+    _networkAuditor = null;
   }
 
   Future<void> _dispatch(String text) async {
@@ -134,6 +169,49 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
     }
   }
 
+  Future<void> _toggleShield() async {
+    if (_isShieldBusy || !_isAuthenticated) return;
+    final state = context.read<AuraStateProvider>();
+    final wasActive = state.isVpnActive;
+    setState(() => _isShieldBusy = true);
+    try {
+      final confirmed = await _shieldChannel.invokeMethod<bool>(
+            wasActive ? 'stopShield' : 'startShield',
+          ) ??
+          false;
+      if (!confirmed) {
+        AgentController.instance.reportWarning(
+          wasActive
+              ? 'Android no confirmó la detención del escudo VPN.'
+              : 'El escudo VPN no se inició; no se confirmó el consentimiento o el servicio.',
+        );
+        return;
+      }
+
+      state.setVpnActive(!wasActive);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              wasActive ? 'Escudo VPN detenido.' : 'Escudo VPN activo.',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } on PlatformException catch (error) {
+      AgentController.instance.reportError(
+        error.message ?? 'Android rechazó la operación del escudo VPN.',
+      );
+    } on MissingPluginException {
+      AgentController.instance.reportError(
+        'El canal nativo del escudo VPN no está disponible.',
+      );
+    } finally {
+      if (mounted) setState(() => _isShieldBusy = false);
+    }
+  }
+
   void _scrollToLatest(int eventCount, {bool force = false}) {
     if (!force && eventCount == _lastRenderedEventCount) return;
     _lastRenderedEventCount = eventCount;
@@ -145,6 +223,7 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final vpnActive = context.watch<AuraStateProvider>().isVpnActive;
     return Scaffold(
       backgroundColor: const Color(0xFF000000),
       resizeToAvoidBottomInset: true,
@@ -152,14 +231,40 @@ class _AuraCoreScreenState extends State<AuraCoreScreen> {
         child: Column(
           children: [
             const SizedBox(height: 48),
-            const Text(
-              'Aura Mobile Defens',
-              style: TextStyle(
-                color: Color(0xFF00FFFF),
-                fontFamily: 'monospace',
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
+            Row(
+              children: [
+                const SizedBox(width: 48),
+                const Expanded(
+                  child: Text(
+                    'Aura Mobile Defens',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: Color(0xFF00FFFF),
+                      fontFamily: 'monospace',
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  key: const ValueKey<String>('vpn-toggle'),
+                  tooltip: vpnActive ? 'Detener escudo VPN' : 'Activar escudo VPN',
+                  onPressed: _isAuthenticated && !_isShieldBusy
+                      ? _toggleShield
+                      : null,
+                  constraints:
+                      const BoxConstraints.tightFor(width: 48, height: 48),
+                  icon: _isShieldBusy
+                      ? const SizedBox.square(
+                          dimension: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Icon(
+                          vpnActive ? Icons.shield : Icons.shield_outlined,
+                          color: vpnActive ? _terminalGreen : _terminalYellow,
+                        ),
               ),
+              ],
             ),
             const SizedBox(height: 16),
             Expanded(

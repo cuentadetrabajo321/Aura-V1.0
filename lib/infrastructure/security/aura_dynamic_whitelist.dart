@@ -193,8 +193,13 @@ class AuraDynamicWhitelist {
         return null;
       }
       candidate = uri.host.toLowerCase();
-    } else if (candidate.contains(RegExp(r'[/\\?#@:')) ||
-        candidate.contains('%')) {
+    } else if (candidate.contains('/') ||
+      candidate.contains('\\') ||
+      candidate.contains('?') ||
+      candidate.contains('#') ||
+      candidate.contains('@') ||
+      candidate.contains(':') ||
+      candidate.contains('%')) {
       return null;
     }
 

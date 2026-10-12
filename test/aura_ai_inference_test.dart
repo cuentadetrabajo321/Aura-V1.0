@@ -1,8 +1,10 @@
-import 'dart:math' as math;
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:aura_mobile_defens/inference/aura_ai_inference.dart';
+import 'package:aura_mobile_defens/models/aura_ai_brain.dart' as model_inference;
 import 'package:test/test.dart';
 
 void main() {
@@ -28,6 +30,36 @@ void main() {
       },
     ],
   };
+
+  group('Active model inference input validation', () {
+    test('ignores invalid DNS labels, ports, and URL credentials', () async {
+      final results = await model_inference.AuraAIInference.analyzeThreatPayload(
+        rawData: jsonEncode(<String, Object>{
+          'hosts': <Map<String, String>>[
+            <String, String>{'host': 'bad.-label.example'},
+            <String, String>{'host': 'bad..example'},
+            <String, String>{'host': 'good.example:443'},
+            <String, String>{'host': 'https://user@good.example/path'},
+          ],
+        }),
+        modelStructure: <String, dynamic>{},
+        suspiciousTlds: <String>[],
+      );
+
+      expect(results, isEmpty);
+    });
+
+    test('normalizes a valid HTTPS URL to its DNS host', () async {
+      final results = await model_inference.AuraAIInference.analyzeThreatPayload(
+        rawData: '{"host":"https://good.example/path"}',
+        modelStructure: _safeForest(),
+        suspiciousTlds: <String>[],
+      );
+
+      expect(results.single.host, 'good.example');
+    });
+
+  });
 
   group('AuraAIInference feature calculations', () {
     test('computes all six features from the normalized host', () {
@@ -334,6 +366,15 @@ void main() {
     });
   });
 }
+
+Map<String, dynamic> _safeForest() => <String, dynamic>{
+      'trees': List<Map<String, Object>>.generate(
+        500,
+        (_) => <String, Object>{
+          'root': <String, Object>{'type': 'leaf', 'value': 0},
+        },
+      ),
+    };
 
 Map<String, dynamic> _forest(List<int> leafVotes) => <String, dynamic>{
       'trees': <Map<String, Object>>[

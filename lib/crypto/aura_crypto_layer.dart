@@ -19,6 +19,9 @@ class AuraCryptoException implements Exception {
 abstract final class AuraCryptoLayer {
   static const int _ivLength = 16;
   static const int _aesBlockLength = 16;
+  static const int _maxModelPlaintextBytes = 5 * 1024 * 1024;
+  static const int _maxModelCiphertextBytes =
+      _maxModelPlaintextBytes + _aesBlockLength;
   static const int _sha256Length = 32;
   static const int _rsa2048SignatureLength = 256;
   static const int _hkdfMaximumLength = 255 * _sha256Length;
@@ -463,7 +466,7 @@ abstract final class AuraCryptoLayer {
       final ciphertextLength = payload.length - _ivLength;
       if (ciphertextLength < _aesBlockLength ||
           ciphertextLength % _aesBlockLength != 0 ||
-          ciphertextLength > 5 * 1024 * 1024) {
+          ciphertextLength > _maxModelCiphertextBytes) {
         throw const AuraCryptoException(
           'La longitud del ciphertext AES no es válida.',
         );

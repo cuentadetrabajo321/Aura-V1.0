@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:aura_mobile_defens/agent/aura_whitelist.dart';
+import 'package:aura_mobile_defens/infrastructure/security/aura_dynamic_whitelist.dart';
 import 'package:aura_mobile_defens/security/shannon_entropy.dart';
 import 'package:test/test.dart';
 
@@ -74,6 +75,17 @@ void main() {
       expect(AuraWhitelist.isSafe('   '), isFalse);
       expect(AuraWhitelist.isSafe('https://'), isFalse);
       expect(AuraWhitelist.isSafe('://google.com'), isFalse);
+    });
+  });
+
+  group('AuraDynamicWhitelist host boundary checks', () {
+    test('validates hosts without throwing on common DNS input', () {
+      final whitelist = AuraDynamicWhitelist.instance;
+
+      expect(whitelist.isSafeHost('google.com'), isTrue);
+      expect(whitelist.isSafeHost('https://cdn.google.com/path'), isTrue);
+      expect(whitelist.isSafeHost('google.com.attacker.com'), isFalse);
+      expect(whitelist.isSafeHost('google..com'), isFalse);
     });
   });
 }

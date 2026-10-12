@@ -102,7 +102,9 @@ class AuraStateProvider extends ChangeNotifier {
     }
     final action = event['action'];
     if (action == 'DGA_ALERT' || action == 'BLOCKED') {
-      _securityLevel = AuraSecurityLevel.warning;
+      if (_securityLevel == AuraSecurityLevel.safe) {
+        _securityLevel = AuraSecurityLevel.warning;
+      }
     }
     notifyListeners();
   }

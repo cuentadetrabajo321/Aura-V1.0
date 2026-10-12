@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:isolate';
 import 'dart:math' as math;
+import 'dart:io';
 
 class AuraInferenceResult {
   const AuraInferenceResult({
@@ -19,6 +20,10 @@ class AuraInferenceResult {
 abstract final class AuraAIInference {
   static const int _expectedTreeCount = 500;
   static const int _maximumTreeDepth = 32;
+  static final RegExp _hostnamePattern = RegExp(
+    r'^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+'
+    r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$',
+  );
   static final RegExp _domainPattern = RegExp(
     r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9-]{1,63})+',
   );
@@ -137,7 +142,7 @@ abstract final class AuraAIInference {
         final value = match.group(0);
         if (value != null) {
           final host = _normalizeHost(value);
-          if (host.contains('.')) hosts.add(host);
+          if (host != null) hosts.add(host);
         }
       }
     }
@@ -153,7 +158,7 @@ abstract final class AuraAIInference {
         final key = entry.key.toString().toLowerCase();
         if (_domainFields.contains(key) && entry.value is String) {
           final host = _normalizeHost(entry.value as String);
-          if (host.contains('.')) hosts.add(host);
+          if (host != null) hosts.add(host);
         } else {
           _collectHosts(entry.value, hosts, depth + 1);
         }
@@ -165,14 +170,37 @@ abstract final class AuraAIInference {
     }
   }
 
-  static String _normalizeHost(String input) {
+  static String? _normalizeHost(String input) {
     var candidate = input.trim().toLowerCase();
+    if (candidate.isEmpty) return null;
     if (candidate.contains('://')) {
-      candidate = Uri.tryParse(candidate)?.host ?? candidate;
+      final uri = Uri.tryParse(candidate);
+      if (uri == null ||
+          (uri.scheme != 'http' && uri.scheme != 'https') ||
+          uri.userInfo.isNotEmpty ||
+          uri.host.isEmpty) {
+        return null;
+      }
+      candidate = uri.host.toLowerCase();
     } else {
-      candidate = candidate.split('/').first.split(':').first;
+          if (candidate.contains('/') ||
+            candidate.contains('\\') ||
+            candidate.contains('?') ||
+            candidate.contains('#') ||
+            candidate.contains('@') ||
+            candidate.contains(':') ||
+            candidate.contains('%')) {
+        return null;
+      }
     }
-    return candidate.replaceFirst(RegExp(r'\.$'), '');
+    if (candidate.endsWith('.')) {
+      candidate = candidate.substring(0, candidate.length - 1);
+    }
+    if (!_hostnamePattern.hasMatch(candidate) ||
+        InternetAddress.tryParse(candidate) != null) {
+      return null;
+    }
+    return candidate;
   }
 
   static List<double> _extractFeatures(

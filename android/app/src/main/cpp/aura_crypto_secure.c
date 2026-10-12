@@ -3,7 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AURA_MODEL_MAX_CIPHERTEXT (5U * 1024U * 1024U)
+#define AURA_MODEL_MAX_CIPHERTEXT (5U * 1024U * 1024U + 16U)
 
 void
 aura_secure_mem_clear (void *buffer, size_t length)
