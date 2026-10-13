@@ -19,11 +19,12 @@ from sklearn.tree import _tree
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMON_DOMAINS_PATH = ROOT / "tool/domain_lists/tranco_top_1000_20261012.txt"
-COMMON_DOMAINS = tuple(
+TRANCO_TOP_1000 = tuple(
     COMMON_DOMAINS_PATH.read_text(encoding="ascii").splitlines()
 )
-if len(COMMON_DOMAINS) != 1000 or len(set(COMMON_DOMAINS)) != 1000:
+if len(TRANCO_TOP_1000) != 1000 or len(set(TRANCO_TOP_1000)) != 1000:
     raise ValueError(f"{COMMON_DOMAINS_PATH} must contain 1000 unique domains")
+COMMON_DOMAINS = TRANCO_TOP_1000
 MODEL_VERSION = "4.0.0"
 FEATURE_ORDER = [
     "length",
@@ -133,16 +134,22 @@ CYRILLIC_CONFUSABLES = {
     "у": "y",
     "х": "x",
 }
-_SUSPICIOUS_KEYWORDS = frozenset(
-    {"free", "reward", "update", "system", "unlock", "premium", "crack"}
-)
+SUSPICIOUS_KEYWORDS = {
+    "free",
+    "reward",
+    "update",
+    "system",
+    "unlock",
+    "premium",
+    "crack",
+}
 _RARE_CHARACTERS = frozenset("qxzk")
 
 
 @lru_cache(maxsize=65536)
 def _minimum_top_domain_distance(host):
     closest_distance = math.inf
-    for common_domain in COMMON_DOMAINS:
+    for common_domain in TRANCO_TOP_1000:
         length_difference = abs(len(host) - len(common_domain))
         if length_difference >= closest_distance:
             continue
@@ -219,14 +226,31 @@ def detect_idn_homoglyphs(domain):
 
 
 def extract_enhanced_features(domain):
+    return extract_maximum_features(domain)
+
+
+def extract_maximum_features(domain):
     host = normalize_domain(domain)
     length = len(host)
     if length == 0:
-        return [0.0] * len(FEATURE_ORDER)
+        return [0.0] * 18
 
     labels = host.split(".")
     tld = labels[-1]
     ascii_letters = [character for character in host if character.isascii() and character.isalpha()]
+    digits = sum(character.isascii() and character.isdigit() for character in host)
+    vowels = sum(character in "aeiou" for character in ascii_letters)
+    consonant_sequence_characters = 0
+    run_length = 0
+    for character in host:
+        if character.isascii() and character.isalpha() and character not in "aeiou":
+            run_length += 1
+        else:
+            if run_length >= 3:
+                consonant_sequence_characters += run_length
+            run_length = 0
+    if run_length >= 3:
+        consonant_sequence_characters += run_length
     consecutive_digits = any(
         host[index].isascii()
         and host[index].isdigit()
@@ -236,8 +260,18 @@ def extract_enhanced_features(domain):
     )
     rare_characters = sum(character in _RARE_CHARACTERS for character in host)
 
-    return extract_legacy_features(host) + [
-        levenshtein_distance_to_top_domains(host),
+    return [
+        float(length),
+        calculate_shannon_entropy(host),
+        digits / length,
+        vowels / len(ascii_letters) if ascii_letters else 0.0,
+        (
+            consonant_sequence_characters / len(ascii_letters)
+            if ascii_letters
+            else 0.0
+        ),
+        float(tld in SUSPICIOUS_TLDS),
+        min(levenshtein_distance_to_top_domains(host), 1.0),
         calculate_bigram_repeat_ratio(host),
         calculate_trigram_repeat_ratio(host),
         min(host.count(".") / 126.0, 1.0),
@@ -248,12 +282,8 @@ def extract_enhanced_features(domain):
         calculate_conditional_entropy(host),
         rare_characters / len(ascii_letters) if ascii_letters else 0.0,
         min(max(map(len, labels), default=0) / 63.0, 1.0),
-        float(any(keyword in host for keyword in _SUSPICIOUS_KEYWORDS)),
+        float(any(keyword in host for keyword in SUSPICIOUS_KEYWORDS)),
     ]
-
-
-def extract_maximum_features(domain):
-    return extract_enhanced_features(domain)
 
 
 def extract_legacy_features(domain):

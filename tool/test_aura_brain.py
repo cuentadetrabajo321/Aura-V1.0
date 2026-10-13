@@ -28,6 +28,7 @@ from train_max_aura_brain import (  # noqa: E402
     calculate_trigram_repeat_ratio,
     detect_idn_homoglyphs,
     extract_enhanced_features,
+    extract_maximum_features,
     is_probable_typosquatting,
     levenshtein_distance_to_top_domains,
     predict_serialized_model,
@@ -122,8 +123,10 @@ def test_offline_fixture_is_within_the_row_limit():
 
 def test_enhanced_features_preserve_legacy_values_and_normalize_new_values():
     features = extract_enhanced_features("ABBB3.XYZ")
+    maximum_features = extract_maximum_features("ABBB3.XYZ")
 
     assert len(features) == 18
+    assert maximum_features == features
     assert features[:6] == [
         9.0,
         -(
