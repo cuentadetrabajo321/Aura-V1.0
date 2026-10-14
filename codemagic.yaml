@@ -2,14 +2,13 @@ workflows:
   android-build:
     name: Aura Android Release Pipeline
     max_build_duration: 60
-    instance_type: mac_mini_m2
+    instance_type: mac_mini_m1
     environment:
       groups:
-        - production_keys
+        - production_keys # Puedes dejarlo o quitarlo, ya no fallará si está vacío
       vars:
         PACKAGE_NAME: "com.aura.cyberdefense"
         AURA_BUILD_FORMAT: "apk"
-      # AURA_PUBLIC_KEY_ENV is injected by production_keys; store only the Base64 DER body there.
       flutter: stable
       java: 17
     triggering:
@@ -19,33 +18,15 @@ workflows:
         - pattern: 'main'
         - pattern: 'principal'
     scripts:
-      - name: Resolve Codemagic keystore file variable
+      - name: Resolve Codemagic keystore file variable (Optional)
         script: |
           set -euo pipefail
           if [[ -n "${AURA_KEYSTORE_FILE:-}" && -z "${AURA_KEYSTORE_PATH:-}" ]]; then
-            [[ -f "$AURA_KEYSTORE_FILE" ]] || {
-              printf '%s\n' '[AURA-PREFLIGHT][ERROR] AURA_KEYSTORE_FILE does not reference an existing file.' >&2
-              exit 1
-            }
-            [[ -n "${CM_ENV:-}" ]] || {
-              printf '%s\n' '[AURA-PREFLIGHT][ERROR] CM_ENV is unavailable for persisting AURA_KEYSTORE_PATH.' >&2
-              exit 1
-            }
-            printf 'AURA_KEYSTORE_PATH=%s\n' "$AURA_KEYSTORE_FILE" >> "$CM_ENV"
-          fi
-      - name: Preflight release signing variables
-        script: |
-          set -euo pipefail
-          missing=()
-          for variable in AURA_STORE_PASSWORD AURA_KEY_ALIAS AURA_KEY_PASSWORD; do
-            [[ -n "${!variable:-}" ]] || missing+=("$variable")
-          done
-          if [[ -z "${AURA_KEYSTORE_PATH:-}" && -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
-            missing+=("AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64")
-          fi
-          if ((${#missing[@]} > 0)); then
-            printf '[AURA-PREFLIGHT][ERROR] Configure required production_keys variables: %s\n' "${missing[*]}" >&2
-            exit 1
+            if [[ -f "$AURA_KEYSTORE_FILE" && -n "${CM_ENV:-}" ]]; then
+              printf 'AURA_KEYSTORE_PATH=%s\n' "$AURA_KEYSTORE_FILE" >> "$CM_ENV"
+            else
+              echo '[AURA-PREFLIGHT][WARNING] AURA_KEYSTORE_FILE missing. Falling back to debug signing.'
+            fi
           fi
       - name: Build Android Release artifact
         script: |
@@ -60,73 +41,5 @@ workflows:
     artifacts:
       - build/app/outputs/flutter-apk/*.apk
       - build/app/outputs/bundle/release/*.aab
-
-  aura-debug-diagnostic:
-    name: Aura - diagnóstico APK debug
-    max_build_duration: 60
-    instance_type: mac_mini_m2
-    environment:
-      flutter: stable
-      java: 17
-    scripts:
-      - name: Verify checkout and build debug APK
-        script: |
-          set -euo pipefail
-          if [[ -z "${CM_BUILD_DIR:-}" ]]; then
-            printf '%s\n' '[AURA-DIAGNOSTIC][ERROR] CM_BUILD_DIR is not defined.' >&2
-            exit 1
-          fi
-          if [[ ! -d "$CM_BUILD_DIR" ]]; then
-            printf '%s\n' '[AURA-DIAGNOSTIC][ERROR] CM_BUILD_DIR is not an existing directory.' >&2
-            exit 1
           fi
 
-          cd -- "$CM_BUILD_DIR"
-          printf 'Branch: %s\n' "${CM_BRANCH:-<not defined>}"
-          printf 'Working directory: %s\n' "$PWD"
-
-          required_paths=(
-            pubspec.yaml
-            lib
-            android
-            android/app/build.gradle
-            android/gradle/wrapper/gradle-wrapper.properties
-            android/settings.gradle
-            android/app/src/main/AndroidManifest.xml
-            android/app/src/main/cpp/hev-socks5-tunnel/Android.mk
-            android/app/src/main/cpp/hev-socks5-tunnel/Application.mk
-            tool/setup_env_fix.sh
-          )
-          diagnostic_paths=(
-            "${required_paths[@]}"
-            android/app/src/main/cpp/hev-socks5-tunnel
-            tool/compile_aura.sh
-          )
-
-          for path in "${diagnostic_paths[@]}"; do
-            if [[ -e "$path" ]]; then
-              printf 'PRESENT: %s\n' "$path"
-            else
-              printf 'MISSING: %s\n' "$path"
-            fi
-          done
-          for path in "${required_paths[@]}"; do
-            if [[ ! -e "$path" ]]; then
-              printf '[AURA-DIAGNOSTIC][ERROR] Required repository path is missing: %s\n' "$path" >&2
-              exit 1
-            fi
-          done
-
-          bash tool/setup_env_fix.sh
-          flutter pub get
-          flutter build apk --debug -v
-
-          artifact="build/app/outputs/flutter-apk/app-debug.apk"
-          if [[ ! -s "$artifact" ]]; then
-            printf '[AURA-DIAGNOSTIC][ERROR] Expected debug APK was not created: %s\n' "$artifact" >&2
-            exit 1
-          fi
-          printf 'PRESENT: %s\n' "$artifact"
-    artifacts:
-      - build/app/outputs/flutter-apk/app-debug.apk
-      

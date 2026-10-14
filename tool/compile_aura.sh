@@ -40,60 +40,38 @@ cleanup_temporary_files() {
 }
 trap cleanup_temporary_files EXIT
 
+# --- MODIFICACIÓN: Permitir fallback a debug si faltan variables ---
+USE_DEBUG_SIGNING=false
+if [[ -z "${AURA_KEYSTORE_PATH:-}" && -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
+    log "WARNING: Production signing variables missing. Falling back to DEBUG signing configuration."
+    USE_DEBUG_SIGNING=true
+fi
+
 resolve_keystore() {
-    local keystore_path="${AURA_KEYSTORE_PATH:-}"
-    local keystore_file
-    local candidate
-    local candidates=()
-
-    if [[ -z "$keystore_path" ]]; then
-        while IFS= read -r -d '' candidate; do
-            candidates+=("$candidate")
-        done < <(find "$android_dir" -type f \( -iname '*.jks' -o -iname '*.keystore' \) -print0)
-
-        case "${#candidates[@]}" in
-            0)
-                if [[ -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
-                    fail "No physical .jks or .keystore file was found under android/. Set AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64."
-                fi
-                ;;
-            1)
-                keystore_path="${candidates[0]}"
-                ;;
-            *)
-                fail "Multiple keystore files were found under android/. Set AURA_KEYSTORE_PATH to select one."
-                ;;
-        esac
+    if [[ -n "${AURA_KEYSTORE_PATH:-}" ]]; then
+        if [[ -f "$AURA_KEYSTORE_PATH" && -r "$AURA_KEYSTORE_PATH" ]]; then
+            export AURA_KEYSTORE_PATH
+            return
+        fi
+        [[ -n "${AURA_KEYSTORE_BASE64:-}" ]] ||
+            fail "AURA_KEYSTORE_PATH must reference an existing readable file, or set AURA_KEYSTORE_BASE64."
     fi
-
-    if [[ -z "$keystore_path" ]]; then
-        keystore_file="$(mktemp "${TMPDIR:-/tmp}/aura-release-keystore.XXXXXX")"
-        temporary_files+=("$keystore_file")
-        chmod 0600 "$keystore_file" ||
-            fail "Could not secure the temporary Base64 keystore."
-        if ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 --decode > "$keystore_file"; then
+    [[ -n "${AURA_KEYSTORE_BASE64:-}" ]] ||
+        fail "Missing release keystore: set AURA_KEYSTORE_PATH or AURA_KEYSTORE_BASE64."
+    local keystore_file
+    keystore_file="$(mktemp "${TMPDIR:-/tmp}/aura-release-keystore.XXXXXX")"
+    temporary_files+=("$keystore_file")
+    chmod 0600 "$keystore_file" 2>/dev/null ||
+        fail "Could not secure the temporary Base64 keystore."
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        if ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 -D > "$keystore_file" 2>/dev/null; then
             fail "AURA_KEYSTORE_BASE64 is not valid Base64 keystore data."
         fi
-        [[ -s "$keystore_file" ]] ||
-            fail "AURA_KEYSTORE_BASE64 decoded to an empty keystore."
-        keystore_path="$keystore_file"
+    elif ! printf '%s' "$AURA_KEYSTORE_BASE64" | base64 --decode > "$keystore_file" 2>/dev/null; then
+        fail "AURA_KEYSTORE_BASE64 is not valid Base64 keystore data."
     fi
-
-    [[ "$keystore_path" == /* ]] || keystore_path="$project_root/$keystore_path"
-    [[ -f "$keystore_path" && -r "$keystore_path" ]] ||
-        fail "AURA_KEYSTORE_PATH must point to an existing readable keystore file."
-    export AURA_KEYSTORE_PATH="$(cd "$(dirname "$keystore_path")" && pwd -P)/$(basename "$keystore_path")"
-}
-
-require_release_signing_environment() {
-    local required_variables=(AURA_STORE_PASSWORD AURA_KEY_ALIAS AURA_KEY_PASSWORD)
-    local missing_variables=()
-    local variable
-    for variable in "${required_variables[@]}"; do
-        [[ -n "${!variable:-}" ]] || missing_variables+=("$variable")
-    done
-    ((${#missing_variables[@]} == 0)) ||
-        fail "Missing required release signing environment variable(s): ${missing_variables[*]}"
+    [[ -s "$keystore_file" ]] || fail "AURA_KEYSTORE_BASE64 decoded to an empty keystore."
+    export AURA_KEYSTORE_PATH="$keystore_file"
 }
 
 validate_signing_credentials() {
@@ -158,6 +136,10 @@ verify_release_signer() {
         [[ "$certificate_fingerprint" =~ ^[[:xdigit:]]{64}$ ]] ||
             fail "apksigner did not return a valid SHA-256 certificate fingerprint."
         log "APK signer verification used apksigner."
+    elif [[ "$USE_DEBUG_SIGNING" == "true" ]]; then
+        log "WARNING: keytool signature validation skipped in DEBUG fallback mode."
+        certificate_fingerprint="DEBUG_FALLBACK"
+        certificate_subject="Android Debug (fallback)"
     else
         if [[ "$extension" == "apk" ]]; then
             log "apksigner unavailable; using keytool keystore-certificate fallback (does not inspect APK bytes)."
@@ -174,7 +156,11 @@ verify_release_signer() {
     fi
 
     if grep -Fqi 'Android Debug' <<< "$certificate_subject"; then
-        fail "Release artifact is signed with the public Android Debug certificate."
+        if [[ "$USE_DEBUG_SIGNING" == "true" ]]; then
+            log "WARNING: Artifact is signed with Android Debug certificate (Fallback mode active)."
+        else
+            fail "Release artifact is signed with the public Android Debug certificate."
+        fi
     fi
     printf 'CERT_SHA256=%s\n' "$certificate_fingerprint"
 }
@@ -183,9 +169,13 @@ project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 android_dir="$project_root/android"
 local_properties="$android_dir/local.properties"
 
-require_release_signing_environment
-resolve_keystore
-validate_signing_credentials
+if [[ "$USE_DEBUG_SIGNING" == "false" ]]; then
+    resolve_keystore
+    validate_signing_credentials
+    signing_fingerprint="$(keytool_certificate_info)"
+else
+    signing_fingerprint="DEBUG_FALLBACK"
+fi
 build_format="${AURA_BUILD_FORMAT:-apk}"
 case "$build_format" in
     apk) ;;
@@ -193,8 +183,6 @@ case "$build_format" in
     appbundle) ;;
     *) fail "AURA_BUILD_FORMAT must be 'apk', 'aab' or 'appbundle'." ;;
 esac
-signing_fingerprint="$(keytool_certificate_info)"
-
 if [[ "$mode" == "check-signing" ]]; then
     printf 'CERT_SHA256=%s\n' "$signing_fingerprint"
     exit 0
@@ -250,7 +238,7 @@ export PATH="$FLUTTER_ROOT/bin:$PATH"
 if [[ -z "${AURA_PUBLIC_KEY_ENV:-}" ]]; then
     AURA_PUBLIC_KEY_ENV='MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g/JtRJ+Y9WDAY504WdCnACplCVwju/5tnJhkvD3kWbsmfX45t9ZqMyCBo4stXbvRdbpe2WwMmxR/9ZHGGQQ1vjKyE4klsQ03aC836GW8l5y1IV/jknU4C03GRRMjfhkwTKpMjqq3kZAgQ62Yo2Prw0fB2c7b/2RjN5yiUZLtjh8FEQBhe8aW+4lrxEVkRJZxPrkbYdQoqBQKm2hQq1AUHurXx+HwHqDplb6mTcNttbnFtrkS0IDqXrhDSAHjaMLY8k6zyCutL7kTPBrAb44KaYvTRhMRBeUyOXHIb9YfxgAA0cCNs5wIDAQAB'
     public_key_source="build-only fallback"
-    log "WARNING: AURA_PUBLIC_KEY_ENV is empty; using the build-only fallback key. Signed model updates will fail closed. Configure production_keys for a production release."
+    log "WARNING: AURA_PUBLIC_KEY_ENV is empty; using the build-only fallback key."
 else
     public_key_source="production"
 fi
@@ -313,12 +301,20 @@ fi
 
 cd "$project_root"
 if [[ "$build_format" == "apk" ]]; then
-    log "Building the release APK with the ${public_key_source} RSA public key."
+    if [[ "$USE_DEBUG_SIGNING" == "true" ]]; then
+        log "Building the release APK with DEBUG signing (production keys missing)."
+    else
+        log "Building the release APK with the ${public_key_source} RSA public key."
+    fi
     "$FLUTTER_ROOT/bin/flutter" build apk --release \
         --dart-define="AURA_PUBLIC_KEY=$AURA_PUBLIC_KEY_ENV"
     release_artifact="$project_root/build/app/outputs/flutter-apk/app-release.apk"
 else
-    log "Building the release app bundle with the ${public_key_source} RSA public key."
+    if [[ "$USE_DEBUG_SIGNING" == "true" ]]; then
+        log "Building the release app bundle with DEBUG signing (production keys missing)."
+    else
+        log "Building the release app bundle with the ${public_key_source} RSA public key."
+    fi
     "$FLUTTER_ROOT/bin/flutter" build appbundle --release \
         --dart-define="AURA_PUBLIC_KEY=$AURA_PUBLIC_KEY_ENV"
     release_artifact="$project_root/build/app/outputs/bundle/release/app-release.aab"

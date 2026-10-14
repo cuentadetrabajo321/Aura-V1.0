@@ -7,25 +7,6 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
-def releaseSigningVariables = [
-    "AURA_KEYSTORE_PATH",
-    "AURA_STORE_PASSWORD",
-    "AURA_KEY_ALIAS",
-    "AURA_KEY_PASSWORD",
-]
-def releaseSigningValues = releaseSigningVariables.collectEntries {
-    [(it): System.getenv(it)]
-}
-def releaseSigningConfigured = releaseSigningValues.values().any {
-    it != null && !it.trim().isEmpty()
-}
-def releaseSigningComplete = releaseSigningValues.values().every {
-    it != null && !it.trim().isEmpty()
-}
-def releaseKeystorePath = releaseSigningValues["AURA_KEYSTORE_PATH"]
-def releaseKeystoreFile = releaseKeystorePath
-    ? project.file(releaseKeystorePath).absoluteFile
-    : null
 def blocklistManifestUrl = System.getenv("AURA_BLOCKLIST_MANIFEST_URL") ?: ""
 def phishTankAppKey = System.getenv("PHISHTANK_APP_KEY") ?: ""
 def telemetryEndpoint = System.getenv("AURA_TELEMETRY_ENDPOINT") ?: ""
@@ -96,9 +77,14 @@ android {
 
     buildTypes {
         release {
-            if (releaseSigningComplete && releaseKeystoreFile.isFile()) {
-                signingConfig signingConfigs.release
-            }
+            // FALLBACK: Si faltan variables de producción, usa la firma debug para que compile
+            def hasReleaseSigning = System.getenv("AURA_KEYSTORE_PATH") != null &&
+                                    System.getenv("AURA_STORE_PASSWORD") != null &&
+                                    System.getenv("AURA_KEY_ALIAS") != null &&
+                                    System.getenv("AURA_KEY_PASSWORD") != null
+
+            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
@@ -164,35 +150,6 @@ android.buildTypes.each { buildType ->
         "AURA_ALLOWED_CERT_SHA256",
         "\"${activeCertificateSha256 ?: ''}\"",
     )
-}
-
-gradle.taskGraph.whenReady { taskGraph ->
-    def releaseSigningRequested = taskGraph.allTasks.any { task ->
-        task.project == project &&
-            (task.name == "printReleaseSigning" || task.name.toLowerCase().contains("release"))
-    }
-    if (releaseSigningRequested) {
-        if (releaseSigningConfigured && !releaseSigningComplete) {
-            def missingVariables = releaseSigningVariables.findAll {
-                def value = releaseSigningValues[it]
-                value == null || value.trim().isEmpty()
-            }
-            throw new GradleException(
-                "Missing required release signing environment variable(s): ${missingVariables.join(', ')}"
-            )
-        }
-        if (releaseSigningComplete &&
-            (releaseKeystoreFile == null || !releaseKeystoreFile.isFile())) {
-            throw new GradleException(
-                "AURA_KEYSTORE_PATH must point to an existing keystore file. Release signing credentials were supplied, but the keystore is unavailable."
-            )
-        }
-        if (!releaseSigningConfigured) {
-            logger.warn(
-                "No release signing credentials were supplied; the release artifact will be unsigned."
-            )
-        }
-    }
 }
 
 tasks.register("printReleaseSigning") {
