@@ -18,7 +18,9 @@ def buildConfigString = { value ->
 android {
     namespace "com.ciberdefensa.aura"
     compileSdk 36
-    ndkVersion = "25.2.13676358"
+
+    // ✅ SOLUCIÓN: Forzar una versión de NDK estable y disponible en los repositorios de Android
+    ndkVersion "26.3.11579264"
 
     buildFeatures {
         buildConfig true
