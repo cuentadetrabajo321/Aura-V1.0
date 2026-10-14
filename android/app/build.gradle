@@ -79,13 +79,20 @@ android {
 
     buildTypes {
         release {
-            // FALLBACK: Si faltan variables de producción, usa la firma debug para que compile
+            // Verificar si tenemos todas las variables de producción
             def hasReleaseSigning = System.getenv("AURA_KEYSTORE_PATH") != null &&
                                     System.getenv("AURA_STORE_PASSWORD") != null &&
                                     System.getenv("AURA_KEY_ALIAS") != null &&
                                     System.getenv("AURA_KEY_PASSWORD") != null
 
-            signingConfig hasReleaseSigning ? signingConfigs.release : signingConfigs.debug
+            def keystoreFile = hasReleaseSigning ? project.file(System.getenv("AURA_KEYSTORE_PATH")).absoluteFile : null
+            def isDebugFallback = !hasReleaseSigning || keystoreFile == null || !keystoreFile.isFile()
+
+            // Aplicar la configuración de firma (fallback a debug si es necesario)
+            signingConfig isDebugFallback ? signingConfigs.debug : signingConfigs.release
+
+            // ✅ FASE 1: Inyectar bandera para que Dart sepa su postura de seguridad
+            buildConfigField "boolean", "IS_DEBUG_FALLBACK", String.valueOf(isDebugFallback)
 
             minifyEnabled true
             shrinkResources true

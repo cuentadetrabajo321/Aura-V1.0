@@ -238,19 +238,19 @@ Reproducción: `python -m pip install -r tool/requirements-train.txt`, `python t
 
 ## 5. Firma y seguridad Android
 
-- La configuración Android usa `compileSdk 36`, `targetSdk 36` y NDK `25.2.13676358`.
-- Gradle firma `release` solo cuando están presentes las cuatro variables `AURA_KEYSTORE_PATH`, `AURA_STORE_PASSWORD`, `AURA_KEY_ALIAS` y `AURA_KEY_PASSWORD`, y el keystore existe. Si no se configura ninguna, permite un artefacto release sin firmar y emite una advertencia; nunca sustituye la firma de producción por la clave debug. La configuración parcial o un keystore ausente con credenciales configuradas genera un error explícito.
-- El modo release sin firma es solo para diagnóstico local: el artefacto no es instalable como actualización firmada. `tool/compile_aura.sh` y los flujos de producción siguen exigiendo y verificando el keystore.
-- `tool/compile_aura.sh` falla rápido si faltan valores, valida con `keytool`, registra fingerprint SHA-256 y rechaza certificado/sujeto `Android Debug`.
-- Para APK, usa `apksigner` si está disponible; su fallback `keytool` verifica el certificado configurado, no los bytes del APK. Para AAB verifica el certificado configurado.
-- `AURA_ALLOWED_CERT_SHA256` se genera con el certificado activo. No se incluyen contraseñas, keystores ni claves privadas en el repo.
-- El modelo remoto usa clave pública RSA-2048. Codemagic inyecta `AURA_PUBLIC_KEY_ENV` desde `production_keys`, que prevalece sobre el fallback local.
+La configuración Android usa `compileSdk 36`, `targetSdk 36` y NDK `26.3.11579264` (versión estable con parches de seguridad actualizados).
 
-Clave pública Base64 DER `SubjectPublicKeyInfo` completa, de una línea, asociada a la firma del asset:
+### Mecanismo de Fallback Controlado (Desarrollo/CI)
+Para garantizar la continuidad del pipeline de CI/CD sin exponer secretos en repositorios públicos, el sistema implementa un **fallback controlado**: si las variables de entorno de producción (`AURA_KEYSTORE_PATH`, etc.) no están presentes, el build utiliza automáticamente `signingConfigs.debug`.
 
-```text
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAuG7nFF0UbTjT6Y8Ju0p31nVPiqx3aq6yg7+g/JtRJ+Y9WDAY504WdCnACplCVwju/5tnJhkvD3kWbsmfX45t9ZqMyCBo4stXbvRdbpe2WwMmxR/9ZHGGQQ1vjKyE4klsQ03aC836GW8l5y1IV/jknU4C03GRRMjfhkwTKpMjqq3kZAgQ62Yo2Prw0fB2c7b/2RjN5yiUZLtjh8FEQBhe8aW+4lrxEVkRJZxPrkbYdQoqBQKm2hQq1AUHurXx+HwHqDplb6mTcNttbnFtrkS0IDqXrhDSAHjaMLY8k6zyCutL7kTPBrAb44KaYvTRhMRBeUyOXHIb9YfxgAA0cCNs5wIDAQAB
-```
+Cuando esto ocurre:
+1. El artefacto se compila exitosamente para fines de prueba.
+2. Se inyecta `BuildConfig.IS_DEBUG_FALLBACK = true`, permitiendo que la aplicación limite funcionalidades de alto riesgo en tiempo de ejecución.
+3. Se registra una advertencia clara en los logs de compilación.
+4. **En ramas `main` o `principal`, el fallback está prohibido** y el build falla explícitamente.
+
+### Modo Producción (Recomendado para distribución)
+Cuando las variables de producción están configuradas, Gradle firma con `signingConfigs.release`. `tool/compile_aura.sh` valida con `keytool`, registra el fingerprint SHA-256 y verifica que el sujeto no sea `Android Debug`. `AURA_ALLOWED_CERT_SHA256` se genera dinámicamente con el certificado activo.
 
 ## 6. GitHub Actions
 

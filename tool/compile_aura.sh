@@ -11,6 +11,18 @@ fail() {
     exit 1
 }
 
+# --- FASE 1: Detección de fallback y protección de rama principal ---
+USE_DEBUG_SIGNING=false
+if [[ -z "${AURA_KEYSTORE_PATH:-}" && -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
+    log "WARNING: Production signing variables missing. Falling back to DEBUG signing configuration."
+    USE_DEBUG_SIGNING=true
+
+    # Proteger la rama principal: el fallback solo es para desarrollo
+    if [[ "${CM_BRANCH:-}" == "main" || "${CM_BRANCH:-}" == "principal" || "${GITHUB_REF:-}" == "refs/heads/main" ]]; then
+        fail "CRITICAL: Production signing variables are strictly required for main/principal branches. Debug fallback is not allowed."
+    fi
+fi
+
 mode="build"
 case "${1:-}" in
     --check-signing)
@@ -39,13 +51,6 @@ cleanup_temporary_files() {
     done
 }
 trap cleanup_temporary_files EXIT
-
-# --- MODIFICACIÓN: Permitir fallback a debug si faltan variables ---
-USE_DEBUG_SIGNING=false
-if [[ -z "${AURA_KEYSTORE_PATH:-}" && -z "${AURA_KEYSTORE_BASE64:-}" ]]; then
-    log "WARNING: Production signing variables missing. Falling back to DEBUG signing configuration."
-    USE_DEBUG_SIGNING=true
-fi
 
 resolve_keystore() {
     if [[ -n "${AURA_KEYSTORE_PATH:-}" ]]; then
